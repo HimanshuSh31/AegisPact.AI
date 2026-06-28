@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: contract_postgres
+    environment:
+      POSTGRES_DB: contract_auditor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d contract_auditor"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - auditor-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: contract_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - auditor-network
+
+  vector-db:
+    image: qdrant/qdrant:latest
+    container_name: contract_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - auditor-network
+
+  web-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: contract_api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password123@postgres:5432/contract_auditor
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://vector-db:6333
+      - JWT_SECRET=supersecretjwtkey12345!@#
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      vector-db:
+        condition: service_healthy
+    networks:
+      - auditor-network
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: contract_worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password123@postgres:5432/contract_auditor
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://vector-db:6333
+      - JWT_SECRET=supersecretjwtkey12345!@#
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      vector-db:
+        condition: service_healthy
+    networks:
+      - auditor-network
+
+networks:
+  auditor-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:

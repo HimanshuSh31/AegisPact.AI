@@ -1,4 +1,4 @@
-# Automated Multi-Modal Contract & Compliance Auditor
+# AegisPact.AI - Automated Multi-Modal Contract & Compliance Auditor
 
 An enterprise-grade, microservices-oriented legal technology application designed to ingest complex multi-page contracts, extract visual layout text/tables, index them into a vector space, run hybrid retrieval audits against compliance framework criteria, and evaluate quality using MLOps Ragas metrics.
 

@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="Automated Multi-Modal Contract & Compliance Auditor API",
+    title="AegisPact.AI API",
     description="Enterprise legal audit platform API with layout parsing and hybrid RAG compliance verification.",
     version="1.0.0",
     lifespan=lifespan

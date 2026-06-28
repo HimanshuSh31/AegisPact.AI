@@ -157,7 +157,7 @@ export default function Dashboard() {
             <Shield className="h-6 w-6 text-white" />
           </div>
           <div>
-            <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">CONTRAC</span>
+            <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">AEGISPACT</span>
             <span className="text-xs block text-indigo-500 font-semibold tracking-widest uppercase">AUDITOR</span>
           </div>
         </div>

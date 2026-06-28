@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Contract Compliance Auditor | Enterprise Legal AI",
+  title: "AegisPact.AI | Enterprise Legal Compliance Auditor",
   description: "Automated Multi-Modal legal document layout parser, Hybrid RAG compliance scoring, and MLOps scorecard validator.",
 };
 

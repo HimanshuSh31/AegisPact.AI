@@ -1,234 +1,366 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { 
-  Shield, Upload, FileText, CheckCircle2, AlertTriangle, 
-  Clock, Database, ArrowRight, BookOpen, BarChart3, HelpCircle,
-  Activity, Play, Search, PlusCircle, UserCheck, Trash2
+import { useRouter } from "next/navigation";
+import {
+  Shield, Upload, FileText, CheckCircle2,
+  Clock, Database, ArrowRight, BookOpen, BarChart3,
+  Activity, Play, UserCheck, Trash2, LogOut,
+  Loader2, AlertCircle, RefreshCw, CloudUpload, XCircle
 } from "lucide-react";
 
-// Mock Database Initial State
-const MOCK_DOCUMENTS = [
-  { id: 1, name: "vendor_master_agreement_v4.pdf", size: "1.4 MB", type: ".pdf", status: "COMPLETED", date: "2026-06-28 10:15" },
-  { id: 2, name: "gdpr_data_processing_addendum.pdf", size: "820 KB", type: ".pdf", status: "COMPLETED", date: "2026-06-27 14:32" },
-  { id: 3, name: "bailey_construction_contract.docx", size: "2.1 MB", type: ".docx", status: "FAILED", date: "2026-06-25 09:12" }
-];
+import { useAuth } from "@/lib/auth";
+import {
+  documentsApi, frameworksApi, auditsApi,
+  type Document, type Framework, type AuditJob
+} from "@/lib/api";
 
-const MOCK_FRAMEWORKS = [
-  { 
-    id: 1, 
-    name: "GDPR Compliance Audit", 
-    description: "General Data Protection Regulation Articles 6, 9, 13, 28, and 32", 
-    rules: [
-      { rule_id: "GDPR-Art6", title: "Lawfulness of Processing", description: "Requires explicit consent or legitimate interest for processing telemetry data." },
-      { rule_id: "GDPR-Art13", title: "Subprocessor Transparency", description: "Requires contract to detail the list of external data recipients." },
-      { rule_id: "GDPR-Art32", title: "Security of Processing", description: "Requires automated encryption key rotations and access control measures." }
-    ]
-  },
-  { 
-    id: 2, 
-    name: "SOC2 Trust Criteria", 
-    description: "Security, Confidentiality, and Processing Integrity checklist", 
-    rules: [
-      { rule_id: "SOC2-CC6.1", title: "Access Control Safeguards", description: "Verify that credentials, API keys, and database passwords are rotated every 90 days." },
-      { rule_id: "SOC2-CC7.3", title: "Vulnerability Management", description: "Requires weekly scans of public network interfaces." }
-    ]
-  },
-  { 
-    id: 3, 
-    name: "HIPAA Privacy Rule", 
-    description: "Protected Health Information (PHI) storage, disclosure, and business associate contracts", 
-    rules: [
-      { rule_id: "HIPAA-164.504", title: "Business Associate Agreements", description: "Verify explicit clauses safeguarding PHI disclosure." }
-    ]
-  }
-];
+// ─── Helpers ─────────────────────────────────────────────
 
-const MOCK_JOBS = [
-  { id: 101, docName: "gdpr_data_processing_addendum.pdf", frameworkName: "GDPR Compliance Audit", status: "COMPLETED", score: 66.7, date: "2026-06-28 10:45", eval: { faithfulness: 0.94, relevance: 0.91, recall: 0.89 } },
-  { id: 102, docName: "vendor_master_agreement_v4.pdf", frameworkName: "SOC2 Trust Criteria", status: "COMPLETED", score: 78, date: "2026-06-28 10:20", eval: { faithfulness: 0.88, relevance: 0.85, recall: 0.92 } }
-];
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-export default function Dashboard() {
-  // Navigation View State
-  const [currentView, setCurrentView] = useState<"dashboard" | "contracts" | "frameworks" | "ragas">("dashboard");
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit"
+  });
+}
 
-  const [documents, setDocuments] = useState(MOCK_DOCUMENTS);
-  const [frameworks, setFrameworks] = useState(MOCK_FRAMEWORKS);
-  const [jobs, setJobs] = useState(MOCK_JOBS);
-  const [selectedDocId, setSelectedDocId] = useState<number | "">("");
-  const [selectedFwId, setSelectedFwId] = useState<number | "">("");
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [newDocName, setNewDocName] = useState("");
-  const [isAuditing, setIsAuditing] = useState(false);
-  const [auditStep, setAuditStep] = useState("");
+// ─── Status Badge ────────────────────────────────────────
 
-  // Simulated File Upload
-  const handleFileUpload = (e: React.FormEvent) => {
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    COMPLETED: "bg-emerald-950/50 text-emerald-400 border border-emerald-900/40",
+    PENDING:   "bg-amber-950/40 text-amber-400 border border-amber-900/30",
+    PROCESSING:"bg-indigo-950/40 text-indigo-400 border border-indigo-900/30",
+    FAILED:    "bg-rose-950/40 text-rose-400 border border-rose-900/30",
+  };
+  return (
+    <span className={`inline-block rounded-full px-2.5 py-0.5 text-[10px] font-bold ${map[status] || map.PENDING}`}>
+      {status}
+    </span>
+  );
+}
+
+// ─── Drag-and-Drop Upload Zone ────────────────────────────
+
+function DropZone({
+  onUpload,
+  isUploading,
+  uploadProgress,
+}: {
+  onUpload: (file: File) => void;
+  isUploading: boolean;
+  uploadProgress: number;
+}) {
+  const [isDragging, setIsDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    if (!newDocName) return;
-    setIsUploading(true);
-    setUploadProgress(10);
-    
-    const interval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setTimeout(() => {
-            setIsUploading(false);
-            const newDoc = {
-              id: documents.length + 1,
-              name: newDocName.endsWith(".pdf") ? newDocName : `${newDocName}.pdf`,
-              size: "1.2 MB",
-              type: ".pdf",
-              status: "COMPLETED" as const,
-              date: new Date().toISOString().replace('T', ' ').substring(0, 16)
-            };
-            setDocuments([newDoc, ...documents]);
-            setSelectedDocId(newDoc.id);
-            setNewDocName("");
-          }, 300);
-          return 100;
-        }
-        return prev + 15;
-      });
-    }, 150);
-  };
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) onUpload(file);
+  }, [onUpload]);
 
-  // Simulated Audit Job Execution (Celery Loop)
-  const handleTriggerAudit = () => {
-    if (!selectedDocId || !selectedFwId) return;
-    const doc = documents.find(d => d.id === Number(selectedDocId));
-    const fw = frameworks.find(f => f.id === Number(selectedFwId));
-    if (!doc || !fw) return;
-
-    setIsAuditing(true);
-    setAuditStep("Initializing Celery Asynchronous Job worker...");
-
-    const steps = [
-      "Stage A: Parsing layout hierarchy (pdfplumber)...",
-      "Extracting contract tables & structure coordinates...",
-      "Stage B: Generating semantic vector embeddings (bge-large)...",
-      "Executing Hybrid retrieval (Dense RAG + Sparse BM25)...",
-      "Running constrained JSON LLM Auditing parser...",
-      "Executing Ragas quality evaluation suite..."
-    ];
-
-    let currentStepIndex = 0;
-    const interval = setInterval(() => {
-      if (currentStepIndex < steps.length) {
-        setAuditStep(steps[currentStepIndex]);
-        currentStepIndex++;
-      } else {
-        clearInterval(interval);
-        setIsAuditing(false);
-        const newJob = {
-          id: 100 + jobs.length + 1,
-          docName: doc.name,
-          frameworkName: fw.name,
-          status: "COMPLETED",
-          score: Math.floor(Math.random() * 25) + 75,
-          date: new Date().toISOString().replace('T', ' ').substring(0, 16),
-          eval: {
-            faithfulness: Number((0.85 + Math.random() * 0.14).toFixed(2)),
-            relevance: Number((0.82 + Math.random() * 0.17).toFixed(2)),
-            recall: Number((0.87 + Math.random() * 0.12).toFixed(2))
-          }
-        };
-        setJobs([newJob, ...jobs]);
-      }
-    }, 1200);
-  };
-
-  // Delete Document helper
-  const handleDeleteDoc = (id: number) => {
-    setDocuments(documents.filter(d => d.id !== id));
-    if (selectedDocId === id) setSelectedDocId("");
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) onUpload(file);
   };
 
   return (
+    <div
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={handleDrop}
+      onClick={() => !isUploading && inputRef.current?.click()}
+      className={`relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${
+        isDragging
+          ? "border-indigo-400 bg-indigo-950/20 scale-[1.01]"
+          : "border-slate-800 bg-slate-900/20 hover:border-indigo-700 hover:bg-indigo-950/10"
+      } ${isUploading ? "pointer-events-none" : ""}`}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf,.docx,.txt"
+        className="hidden"
+        onChange={handleChange}
+      />
+
+      {isUploading ? (
+        <>
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
+          <div className="w-full max-w-xs">
+            <div className="flex justify-between text-xs text-slate-400 mb-1.5">
+              <span>Uploading & parsing layout...</span>
+              <span className="font-semibold text-white">{uploadProgress}%</span>
+            </div>
+            <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-300"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-indigo-950/50 border border-indigo-900/30">
+            <CloudUpload className="h-7 w-7 text-indigo-400" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-slate-200">
+              Drop a contract file here
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              PDF, DOCX, or TXT — max 50 MB
+            </p>
+          </div>
+          <span className="text-xs text-indigo-400 font-semibold border border-indigo-900/30 bg-indigo-950/20 rounded-lg px-3 py-1">
+            Browse files
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Live Progress Steps ──────────────────────────────────
+
+function ProgressStream({
+  jobId,
+  onComplete,
+}: {
+  jobId: number;
+  onComplete: () => void;
+}) {
+  const [steps, setSteps] = useState<Array<{ message: string; step: number; total: number }>>([]);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const es = auditsApi.streamProgress(
+      jobId,
+      (data) => {
+        setSteps((prev) => [...prev.filter((s) => s.step !== data.step), data]);
+        if (data.done) {
+          setDone(true);
+          onComplete();
+        }
+      },
+      onComplete
+    );
+    return () => es.close();
+  }, [jobId, onComplete]);
+
+  if (steps.length === 0) return (
+    <div className="flex items-center gap-2 text-xs text-slate-400">
+      <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+      Connecting to audit stream...
+    </div>
+  );
+
+  return (
+    <div className="space-y-1.5">
+      {steps.map((s) => (
+        <div key={s.step} className="flex items-center gap-2 text-xs">
+          {done || s.step < steps.length ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+          ) : (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400 shrink-0" />
+          )}
+          <span className={done || s.step < steps.length ? "text-slate-400" : "text-slate-200 font-medium"}>
+            {s.message}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Main Dashboard ───────────────────────────────────────
+
+export default function Dashboard() {
+  const router = useRouter();
+  const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
+
+  const [currentView, setCurrentView] = useState<"dashboard" | "contracts" | "frameworks" | "ragas">("dashboard");
+
+  // API data
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [frameworks, setFrameworks] = useState<Framework[]>([]);
+  const [jobs, setJobs] = useState<AuditJob[]>([]);
+  const [apiLoading, setApiLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  // Upload state
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  // Audit state
+  const [selectedDocId, setSelectedDocId] = useState<number | "">("");
+  const [selectedFwId, setSelectedFwId] = useState<number | "">("");
+  const [activeJobId, setActiveJobId] = useState<number | null>(null);
+  const [isAuditing, setIsAuditing] = useState(false);
+
+  // Auth guard
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push("/login");
+    }
+  }, [authLoading, isAuthenticated, router]);
+
+  // Load API data
+  const loadData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    setApiLoading(true);
+    setApiError(null);
+    try {
+      const [docs, fws] = await Promise.all([
+        documentsApi.list(),
+        frameworksApi.list(),
+      ]);
+      setDocuments(docs);
+      setFrameworks(fws);
+    } catch (e: any) {
+      setApiError(e?.message || "Failed to load data from API.");
+    } finally {
+      setApiLoading(false);
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // Handle real file upload
+  const handleFileUpload = useCallback(async (file: File) => {
+    setIsUploading(true);
+    setUploadProgress(10);
+
+    // Simulated progress ticks while upload runs
+    const interval = setInterval(() => {
+      setUploadProgress((p) => Math.min(p + 12, 85));
+    }, 300);
+
+    try {
+      const doc = await documentsApi.upload(file);
+      clearInterval(interval);
+      setUploadProgress(100);
+      setTimeout(() => {
+        setDocuments((prev) => [doc, ...prev]);
+        setIsUploading(false);
+        setUploadProgress(0);
+        setSelectedDocId(doc.id);
+      }, 400);
+    } catch (e: any) {
+      clearInterval(interval);
+      setIsUploading(false);
+      setUploadProgress(0);
+      setApiError(e?.message || "Upload failed. Please try again.");
+    }
+  }, []);
+
+  // Trigger real audit
+  const handleTriggerAudit = useCallback(async () => {
+    if (!selectedDocId || !selectedFwId) return;
+    setIsAuditing(true);
+    setApiError(null);
+    try {
+      const job = await auditsApi.run(Number(selectedDocId), Number(selectedFwId));
+      setJobs((prev) => [job, ...prev]);
+      setActiveJobId(job.id);
+    } catch (e: any) {
+      setIsAuditing(false);
+      setApiError(e?.message || "Failed to start audit job.");
+    }
+  }, [selectedDocId, selectedFwId]);
+
+  const handleAuditComplete = useCallback(async () => {
+    if (!activeJobId) return;
+    try {
+      const updated = await auditsApi.get(activeJobId);
+      setJobs((prev) => prev.map((j) => j.id === updated.id ? updated : j));
+    } catch {}
+    setIsAuditing(false);
+    setActiveJobId(null);
+  }, [activeJobId]);
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
+      </div>
+    );
+  }
+
+  return (
     <div className="flex min-h-screen bg-slate-950 font-sans text-slate-100">
-      {/* Sidebar Navigation */}
-      <aside className="w-64 border-r border-slate-900 bg-slate-950/80 p-6 flex flex-col gap-8">
+
+      {/* Sidebar */}
+      <aside className="w-64 border-r border-slate-900 bg-slate-950/80 p-6 flex flex-col gap-8 shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600 shadow-lg shadow-indigo-600/30">
             <Shield className="h-6 w-6 text-white" />
           </div>
           <div>
-            <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">AEGISPACT</span>
-            <span className="text-xs block text-indigo-500 font-semibold tracking-widest uppercase">AUDITOR</span>
+            <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+              AEGISPACT
+            </span>
+            <span className="text-xs block text-indigo-500 font-semibold tracking-widest uppercase">
+              AUDITOR
+            </span>
           </div>
         </div>
 
         <nav className="flex flex-col gap-1.5 flex-1">
           <p className="text-[10px] font-bold text-slate-500 tracking-wider uppercase mb-2">Workspace</p>
-          
-          <button 
-            onClick={() => setCurrentView("dashboard")}
-            className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
-              currentView === "dashboard" 
-                ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200" 
-                : "text-slate-400 hover:bg-slate-900/50 hover:text-white"
-            }`}
-          >
-            <Database className="h-4.5 w-4.5 text-indigo-400" />
-            Dashboard
-          </button>
-          
-          <button 
-            onClick={() => setCurrentView("contracts")}
-            className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
-              currentView === "contracts" 
-                ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200" 
-                : "text-slate-400 hover:bg-slate-900/50 hover:text-white"
-            }`}
-          >
-            <FileText className="h-4.5 w-4.5 text-indigo-450" />
-            Legal Contracts
-          </button>
-          
-          <button 
-            onClick={() => setCurrentView("frameworks")}
-            className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
-              currentView === "frameworks" 
-                ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200" 
-                : "text-slate-400 hover:bg-slate-900/50 hover:text-white"
-            }`}
-          >
-            <BookOpen className="h-4.5 w-4.5" />
-            Frameworks
-          </button>
-          
-          <button 
-            onClick={() => setCurrentView("ragas")}
-            className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
-              currentView === "ragas" 
-                ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200" 
-                : "text-slate-400 hover:bg-slate-900/50 hover:text-white"
-            }`}
-          >
-            <BarChart3 className="h-4.5 w-4.5" />
-            MLOps Quality Ragas
-          </button>
+          {[
+            { id: "dashboard", icon: Database, label: "Dashboard" },
+            { id: "contracts", icon: FileText, label: "Legal Contracts" },
+            { id: "frameworks", icon: BookOpen, label: "Frameworks" },
+            { id: "ragas", icon: BarChart3, label: "MLOps Quality Ragas" },
+          ].map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              onClick={() => setCurrentView(id as any)}
+              className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
+                currentView === id
+                  ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200"
+                  : "text-slate-400 hover:bg-slate-900/50 hover:text-white"
+              }`}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+            </button>
+          ))}
         </nav>
 
-        <div className="rounded-xl border border-indigo-900/30 bg-indigo-950/20 p-4">
-          <div className="flex items-center gap-2 mb-2 text-indigo-400 text-xs font-semibold">
-            <Activity className="h-4 w-4" />
-            System Metrics
+        <div className="space-y-3">
+          <div className="rounded-xl border border-indigo-900/30 bg-indigo-950/20 p-4">
+            <div className="flex items-center gap-2 mb-2 text-indigo-400 text-xs font-semibold">
+              <Activity className="h-4 w-4" /> System
+            </div>
+            <p className="text-[10px] text-slate-400">API Status</p>
+            <p className="text-sm font-bold text-emerald-400 mt-0.5">● Online</p>
           </div>
-          <p className="text-[10px] text-slate-400">Ragas Faithfulness Avg</p>
-          <p className="text-lg font-bold text-indigo-200">91.0%</p>
+          <button
+            onClick={() => { logout(); router.push("/login"); }}
+            className="flex w-full items-center gap-2 rounded-lg px-3.5 py-2.5 text-sm text-slate-500 hover:text-rose-400 hover:bg-rose-950/20 transition-all"
+          >
+            <LogOut className="h-4 w-4" /> Sign Out
+          </button>
         </div>
       </aside>
 
-      {/* Main Workspace Frame */}
+      {/* Main Content */}
       <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
-        
-        {/* Workspace Header */}
-        <header className="flex items-center justify-between border-b border-slate-900 px-8 py-6 shrink-0 bg-slate-950/40">
+
+        {/* Header */}
+        <header className="flex items-center justify-between border-b border-slate-900 px-8 py-5 shrink-0 bg-slate-950/40">
           <div>
             <h1 className="text-xl font-bold tracking-tight text-white capitalize">
               {currentView === "dashboard" && "Compliance Workspace"}
@@ -236,230 +368,194 @@ export default function Dashboard() {
               {currentView === "frameworks" && "Audit Policy Frameworks"}
               {currentView === "ragas" && "MLOps Ragas Quality Monitor"}
             </h1>
-            <p className="text-xs text-slate-400">
-              {currentView === "dashboard" && "Perform RAG compliance audits and view the Celery execution status queue."}
-              {currentView === "contracts" && "Manage uploaded documents, verify parsed structure manifests, and download records."}
-              {currentView === "frameworks" && "Manage policy control checklists and verify rules configuration details."}
-              {currentView === "ragas" && "Grounded factual indexing scores, answer relevance, and context precision analysis."}
+            <p className="text-xs text-slate-400 mt-0.5">
+              {currentView === "dashboard" && "Upload contracts, trigger RAG audits, and track live Celery job progress."}
+              {currentView === "contracts" && "Manage uploaded documents and parsed structure manifests."}
+              {currentView === "frameworks" && "Manage policy control checklists and compliance rule configurations."}
+              {currentView === "ragas" && "Faithfulness, answer relevance, and context precision analysis."}
             </p>
           </div>
-          <div className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/40 px-3.5 py-1.5 text-xs text-slate-300">
-            <UserCheck className="h-4 w-4 text-emerald-500" />
-            Jane Doe (Acme Corp)
+          <div className="flex items-center gap-3">
+            <button onClick={loadData} className="p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all">
+              <RefreshCw className="h-4 w-4" />
+            </button>
+            <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3.5 py-1.5 text-xs text-slate-300">
+              <UserCheck className="h-4 w-4 text-emerald-500" />
+              Authenticated
+            </div>
           </div>
         </header>
 
-        {/* Content Pane */}
+        {/* Error Banner */}
+        {apiError && (
+          <div className="mx-8 mt-4 flex items-center gap-3 rounded-xl border border-rose-900/40 bg-rose-950/20 px-4 py-3 text-sm text-rose-400">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span className="flex-1">{apiError}</span>
+            <button onClick={() => setApiError(null)}><XCircle className="h-4 w-4" /></button>
+          </div>
+        )}
+
+        {/* Content */}
         <div className="flex-1 overflow-y-auto p-8 lg:p-10">
 
-          {/* VIEW 1: DASHBOARD VIEW */}
+          {/* ── DASHBOARD VIEW ── */}
           {currentView === "dashboard" && (
             <div className="space-y-8">
-              {/* Top Cards Row */}
+              {/* Stats Row */}
               <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="glass-card rounded-xl p-6">
-                  <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Contracts Ingested</p>
-                  <h3 className="text-3xl font-bold text-white mt-2">{documents.length}</h3>
-                  <span className="text-[10px] text-slate-500 block mt-1">Multi-page parsed</span>
-                </div>
-                <div className="glass-card rounded-xl p-6">
-                  <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Compliance Scores Avg</p>
-                  <h3 className="text-3xl font-bold text-emerald-500 mt-2">85%</h3>
-                  <span className="text-[10px] text-slate-500 block mt-1">GDPR & SOC2 metrics</span>
-                </div>
-                <div className="glass-card rounded-xl p-6">
-                  <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Active Celery Workers</p>
-                  <h3 className="text-3xl font-bold text-indigo-400 mt-2">2 Online</h3>
-                  <span className="text-[10px] text-slate-500 block mt-1">Redis queue active</span>
-                </div>
-                <div className="glass-card rounded-xl p-6">
-                  <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Faithfulness Index</p>
-                  <h3 className="text-3xl font-bold text-white mt-2">91%</h3>
-                  <span className="text-[10px] text-emerald-400 block mt-1 font-semibold">Zero hallucinations</span>
-                </div>
+                {[
+                  { label: "Contracts Ingested", value: String(documents.length), sub: "Files parsed" },
+                  { label: "Active Audit Jobs", value: String(jobs.filter(j => j.status === "PROCESSING" || j.status === "PENDING").length), sub: "In Celery queue" },
+                  { label: "Completed Audits", value: String(jobs.filter(j => j.status === "COMPLETED").length), sub: "Scorecards generated" },
+                  { label: "Avg Compliance Score", value: jobs.filter(j => j.compliance_score).length ? `${Math.round(jobs.filter(j => j.compliance_score).reduce((a, j) => a + (j.compliance_score || 0), 0) / jobs.filter(j => j.compliance_score).length)}%` : "—", sub: "Across all audits" },
+                ].map(({ label, value, sub }) => (
+                  <div key={label} className="rounded-xl border border-slate-900 bg-slate-900/30 p-6">
+                    <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</p>
+                    <h3 className="text-3xl font-bold text-white mt-2">{apiLoading ? "..." : value}</h3>
+                    <span className="text-[10px] text-slate-500">{sub}</span>
+                  </div>
+                ))}
               </section>
 
-              {/* Ingestion and launch split grid */}
               <div className="grid gap-8 lg:grid-cols-12">
-                {/* Upload panel */}
-                <div className="glass-panel rounded-xl p-6 lg:col-span-5 flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-bold text-white mb-2 flex items-center gap-2">
-                      <Upload className="h-5 w-5 text-indigo-400" />
-                      Ingest New Contract
-                    </h2>
-                    <p className="text-xs text-slate-400 mb-6">Upload agreement files (PDF, Docx, TXT) to parse text layouts and visual tables.</p>
-
-                    <form onSubmit={handleFileUpload} className="space-y-4">
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-400 mb-2">Contract File Name</label>
-                        <input 
-                          type="text" 
-                          placeholder="e.g. vendor_sla_agreement.pdf"
-                          value={newDocName}
-                          onChange={(e) => setNewDocName(e.target.value)}
-                          className="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                        />
-                      </div>
-
-                      <button 
-                        type="submit" 
-                        disabled={isUploading || !newDocName}
-                        className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors"
-                      >
-                        <PlusCircle className="h-4.5 w-4.5" />
-                        Register & Parse PDF
-                      </button>
-                    </form>
-                  </div>
-
-                  {isUploading && (
-                    <div className="mt-6 border border-slate-800 bg-slate-900/40 rounded-lg p-4">
-                      <div className="flex justify-between text-xs text-slate-400 mb-2">
-                        <span>Parsing layout structures...</span>
-                        <span className="font-semibold">{uploadProgress}%</span>
-                      </div>
-                      <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-indigo-500 transition-all duration-150" style={{ width: `${uploadProgress}%` }}></div>
-                      </div>
-                    </div>
-                  )}
+                {/* Upload Panel */}
+                <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6 lg:col-span-5">
+                  <h2 className="text-base font-bold text-white mb-1 flex items-center gap-2">
+                    <Upload className="h-5 w-5 text-indigo-400" /> Ingest New Contract
+                  </h2>
+                  <p className="text-xs text-slate-400 mb-5">Upload legal agreements to parse text layouts and visual tables.</p>
+                  <DropZone onUpload={handleFileUpload} isUploading={isUploading} uploadProgress={uploadProgress} />
                 </div>
 
-                {/* Audit trigger panel */}
-                <div className="glass-panel rounded-xl p-6 lg:col-span-7">
-                  <h2 className="text-base font-bold text-white mb-2 flex items-center gap-2">
-                    <Play className="h-5 w-5 text-emerald-400" />
-                    Initiate Policy Compliance Audit
+                {/* Audit Trigger Panel */}
+                <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6 lg:col-span-7">
+                  <h2 className="text-base font-bold text-white mb-1 flex items-center gap-2">
+                    <Play className="h-5 w-5 text-emerald-400" /> Initiate Compliance Audit
                   </h2>
-                  <p className="text-xs text-slate-400 mb-6">Select an uploaded legal document and choose a regulatory criteria framework to verify compliance.</p>
+                  <p className="text-xs text-slate-400 mb-5">Select a document and a regulatory framework to run the Hybrid RAG audit pipeline.</p>
 
-                  <div className="grid gap-5 sm:grid-cols-2 mb-6">
+                  <div className="grid gap-4 sm:grid-cols-2 mb-5">
                     <div>
-                      <label className="block text-xs font-semibold text-slate-400 mb-2">1. Select Contract Document</label>
-                      <select 
-                        value={selectedDocId} 
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">1. Select Contract</label>
+                      <select
+                        value={selectedDocId}
                         onChange={(e) => setSelectedDocId(e.target.value === "" ? "" : Number(e.target.value))}
                         className="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       >
-                        <option value="">-- Choose Contract --</option>
-                        {documents.map(d => (
+                        <option value="">— Choose Contract —</option>
+                        {documents.map((d) => (
                           <option key={d.id} value={d.id}>{d.name}</option>
                         ))}
                       </select>
                     </div>
-
                     <div>
-                      <label className="block text-xs font-semibold text-slate-400 mb-2">2. Compliance Policy Framework</label>
-                      <select 
-                        value={selectedFwId} 
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">2. Policy Framework</label>
+                      <select
+                        value={selectedFwId}
                         onChange={(e) => setSelectedFwId(e.target.value === "" ? "" : Number(e.target.value))}
                         className="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       >
-                        <option value="">-- Choose Framework --</option>
-                        {frameworks.map(f => (
+                        <option value="">— Choose Framework —</option>
+                        {frameworks.map((f) => (
                           <option key={f.id} value={f.id}>{f.name} ({f.rules.length} Rules)</option>
                         ))}
                       </select>
                     </div>
                   </div>
 
-                  <button 
+                  <button
                     onClick={handleTriggerAudit}
                     disabled={isAuditing || !selectedDocId || !selectedFwId}
-                    className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors shadow-lg shadow-emerald-950/20"
+                    className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors"
                   >
-                    <Shield className="h-4.5 w-4.5" />
-                    Trigger Asynchronous Audit Job
+                    {isAuditing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+                    {isAuditing ? "Audit Running..." : "Trigger Asynchronous Audit Job"}
                   </button>
 
-                  {isAuditing && (
-                    <div className="mt-5 rounded-lg border border-slate-800/80 bg-slate-900/20 p-4">
-                      <div className="flex items-center gap-3">
-                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div>
-                        <div>
-                          <p className="text-xs font-semibold text-slate-200">{auditStep}</p>
-                          <p className="text-[10px] text-slate-500">Task queued in Celery worker</p>
-                        </div>
-                      </div>
+                  {isAuditing && activeJobId && (
+                    <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                      <p className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">
+                        Live Progress — Job #{activeJobId}
+                      </p>
+                      <ProgressStream jobId={activeJobId} onComplete={handleAuditComplete} />
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* Jobs Queue Table */}
-              <section className="glass-panel rounded-xl p-6">
+              {/* Jobs Table */}
+              <section className="rounded-xl border border-slate-900 bg-slate-900/20 p-6">
                 <h2 className="text-base font-bold text-white mb-4 flex items-center gap-2">
-                  <Clock className="h-5 w-5 text-indigo-400" />
-                  Audit Jobs Queue & Results
+                  <Clock className="h-5 w-5 text-indigo-400" /> Audit Jobs Queue
                 </h2>
-                
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm text-slate-400">
-                    <thead className="bg-slate-900/60 text-xs font-bold text-slate-300 uppercase tracking-wider">
-                      <tr>
-                        <th className="px-6 py-3.5 rounded-l-lg">Job ID</th>
-                        <th className="px-6 py-3.5">Contract Name</th>
-                        <th className="px-6 py-3.5">Framework Policy</th>
-                        <th className="px-6 py-3.5 text-center">Audit Score</th>
-                        <th className="px-6 py-3.5 text-center">Quality (Ragas)</th>
-                        <th className="px-6 py-3.5">Execution Status</th>
-                        <th className="px-6 py-3.5 rounded-r-lg text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-900">
-                      {jobs.map((job) => (
-                        <tr key={job.id} className="hover:bg-slate-900/30 transition-colors">
-                          <td className="px-6 py-4 font-mono text-xs text-slate-500">#{job.id}</td>
-                          <td className="px-6 py-4 font-medium text-slate-200">{job.docName}</td>
-                          <td className="px-6 py-4 text-slate-400">{job.frameworkName}</td>
-                          <td className="px-6 py-4 text-center">
-                            <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-bold ${
-                              job.score >= 85 ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-900/40' : 'bg-amber-950/50 text-amber-400 border border-amber-900/40'
-                            }`}>
-                              {job.score.toFixed(1)}% Compliant
-                            </span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <div className="flex flex-col gap-0.5 text-[10px] text-slate-500">
-                              <span>Faithfulness: <b className="text-slate-300 font-semibold">{Math.round(job.eval.faithfulness * 100)}%</b></span>
-                              <span>Recall: <b className="text-slate-300 font-semibold">{Math.round(job.eval.recall * 100)}%</b></span>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className="flex items-center gap-1.5 text-xs text-emerald-400">
-                              <CheckCircle2 className="h-4 w-4" />
-                              COMPLETED
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <Link 
-                              href={`/audit/${job.id}`}
-                              className="inline-flex items-center gap-1 text-xs font-bold text-indigo-400 hover:text-indigo-300"
-                            >
-                              Verify Findings
-                              <ArrowRight className="h-3 w-3" />
-                            </Link>
-                          </td>
+                {apiLoading ? (
+                  <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-indigo-400" /></div>
+                ) : jobs.length === 0 ? (
+                  <div className="text-center py-12 text-slate-500 text-sm">
+                    No audit jobs yet. Upload a contract and trigger an audit above.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm text-slate-400">
+                      <thead className="bg-slate-900/60 text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        <tr>
+                          <th className="px-5 py-3.5 rounded-l-lg">Job ID</th>
+                          <th className="px-5 py-3.5">Document ID</th>
+                          <th className="px-5 py-3.5">Framework ID</th>
+                          <th className="px-5 py-3.5 text-center">Score</th>
+                          <th className="px-5 py-3.5 text-center">Status</th>
+                          <th className="px-5 py-3.5 rounded-r-lg text-right">Actions</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody className="divide-y divide-slate-900">
+                        {jobs.map((job) => (
+                          <tr key={job.id} className="hover:bg-slate-900/30 transition-colors">
+                            <td className="px-5 py-4 font-mono text-xs text-slate-500">#{job.id}</td>
+                            <td className="px-5 py-4 text-slate-300">Doc #{job.document_id}</td>
+                            <td className="px-5 py-4 text-slate-400">FW #{job.framework_id}</td>
+                            <td className="px-5 py-4 text-center">
+                              {job.compliance_score != null ? (
+                                <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-bold ${
+                                  job.compliance_score >= 80
+                                    ? "bg-emerald-950/50 text-emerald-400 border border-emerald-900/40"
+                                    : "bg-amber-950/50 text-amber-400 border border-amber-900/40"
+                                }`}>
+                                  {job.compliance_score.toFixed(1)}%
+                                </span>
+                              ) : <span className="text-slate-600">—</span>}
+                            </td>
+                            <td className="px-5 py-4 text-center"><StatusBadge status={job.status} /></td>
+                            <td className="px-5 py-4 text-right">
+                              <Link
+                                href={`/audit/${job.id}`}
+                                className="inline-flex items-center gap-1 text-xs font-bold text-indigo-400 hover:text-indigo-300"
+                              >
+                                Findings <ArrowRight className="h-3 w-3" />
+                              </Link>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </section>
             </div>
           )}
 
-          {/* VIEW 2: CONTRACTS MANAGER VIEW */}
+          {/* ── CONTRACTS VIEW ── */}
           {currentView === "contracts" && (
-            <div className="glass-panel rounded-xl p-6 space-y-6">
+            <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6 space-y-4">
               <div className="flex justify-between items-center pb-4 border-b border-slate-900">
                 <h3 className="text-base font-bold text-white">Repository Files</h3>
-                <span className="text-xs text-slate-400">{documents.length} Agreements Registered</span>
+                <span className="text-xs text-slate-400">{documents.length} Agreements</span>
               </div>
-              
-              <div className="grid gap-4">
-                {documents.map((doc) => (
+              {apiLoading ? (
+                <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-indigo-400" /></div>
+              ) : documents.length === 0 ? (
+                <div className="text-center py-12 text-slate-500 text-sm">No contracts ingested yet.</div>
+              ) : (
+                documents.map((doc) => (
                   <div key={doc.id} className="flex justify-between items-center p-4 border border-slate-900 rounded-xl bg-slate-950/20 hover:border-slate-800 transition-all">
                     <div className="flex items-center gap-4">
                       <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-950/50 border border-indigo-900/30 text-indigo-400">
@@ -467,113 +563,105 @@ export default function Dashboard() {
                       </div>
                       <div>
                         <h4 className="font-semibold text-slate-200 text-sm">{doc.name}</h4>
-                        <p className="text-[10px] text-slate-500">Size: {doc.size} | Registered: {doc.date}</p>
+                        <p className="text-[10px] text-slate-500">
+                          {formatBytes(doc.size_bytes)} · {doc.file_type} · {formatDate(doc.created_at)}
+                        </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        doc.status === "COMPLETED" ? 'bg-emerald-950/40 text-emerald-400' : 'bg-rose-950/40 text-rose-450'
-                      }`}>
-                        {doc.status}
-                      </span>
-                      <button 
-                        onClick={() => handleDeleteDoc(doc.id)}
-                        className="p-1.5 border border-slate-800 rounded-lg hover:border-rose-900 hover:text-rose-400 text-slate-500 transition-all"
-                        title="Delete Document"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
+                    <StatusBadge status={doc.status} />
                   </div>
-                ))}
-              </div>
+                ))
+              )}
             </div>
           )}
 
-          {/* VIEW 3: FRAMEWORKS VIEW */}
+          {/* ── FRAMEWORKS VIEW ── */}
           {currentView === "frameworks" && (
-            <div className="space-y-6">
-              {frameworks.map((fw) => (
-                <div key={fw.id} className="glass-panel rounded-xl p-6 space-y-4">
-                  <div className="pb-3 border-b border-slate-900 flex justify-between items-center">
-                    <div>
-                      <h3 className="text-base font-bold text-white">{fw.name}</h3>
-                      <p className="text-xs text-slate-400 mt-0.5">{fw.description}</p>
+            <div className="space-y-5">
+              {apiLoading ? (
+                <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-indigo-400" /></div>
+              ) : frameworks.length === 0 ? (
+                <div className="text-center py-12 text-slate-500 text-sm rounded-xl border border-slate-900 bg-slate-900/20">No frameworks registered.</div>
+              ) : (
+                frameworks.map((fw) => (
+                  <div key={fw.id} className="rounded-xl border border-slate-900 bg-slate-900/20 p-6 space-y-4">
+                    <div className="pb-3 border-b border-slate-900 flex justify-between items-center">
+                      <div>
+                        <h3 className="text-base font-bold text-white">{fw.name}</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{fw.description}</p>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold bg-indigo-950/50 text-indigo-400 border border-indigo-900/30 rounded-full px-3 py-1">
+                        {fw.rules.length} Rules
+                      </span>
                     </div>
-                    <span className="text-[10px] font-mono font-bold bg-indigo-950/50 text-indigo-400 border border-indigo-900/30 rounded-full px-3 py-1">
-                      {fw.rules.length} Rules Active
-                    </span>
-                  </div>
-
-                  <div className="space-y-3">
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Compliance Criteria:</p>
                     {fw.rules.map((rule) => (
-                      <div key={rule.rule_id} className="p-4 border border-slate-900 bg-slate-950/40 rounded-lg space-y-1">
-                        <div className="flex justify-between items-center">
+                      <div key={rule.rule_id} className="p-4 border border-slate-900 bg-slate-950/40 rounded-lg">
+                        <div className="flex justify-between items-center mb-1">
                           <span className="font-mono text-xs font-bold text-indigo-400">{rule.rule_id}</span>
                           <span className="text-xs font-semibold text-slate-200">{rule.title}</span>
                         </div>
-                        <p className="text-xs text-slate-400 pl-4 border-l border-slate-800 italic font-light">{rule.description}</p>
+                        <p className="text-xs text-slate-400 pl-4 border-l border-slate-800 italic">{rule.description}</p>
                       </div>
                     ))}
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           )}
 
-          {/* VIEW 4: RAGAS MLOps VIEW */}
+          {/* ── RAGAS VIEW ── */}
           {currentView === "ragas" && (
             <div className="space-y-8">
-              {/* Avg chart mock card */}
-              <div className="glass-panel rounded-xl p-6 space-y-4">
+              <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6 space-y-6">
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <BarChart3 className="h-5 w-5 text-indigo-400" />
-                  Ragas Evaluation Averages
+                  <BarChart3 className="h-5 w-5 text-indigo-400" /> Ragas Evaluation Averages
                 </h3>
-                <p className="text-xs text-slate-400">Average quality metrics logged over the last 15 audit jobs across API and Celery workers.</p>
-
                 <div className="grid gap-6 sm:grid-cols-3">
-                  <div className="p-4 border border-slate-900 rounded-lg bg-slate-950/20 text-center">
-                    <p className="text-xs text-slate-400">Faithfulness</p>
-                    <h4 className="text-2xl font-bold text-emerald-400 mt-1">91%</h4>
-                    <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden mt-3">
-                      <div className="h-full bg-emerald-500" style={{ width: "91%" }}></div>
-                    </div>
-                  </div>
-                  <div className="p-4 border border-slate-900 rounded-lg bg-slate-950/20 text-center">
-                    <p className="text-xs text-slate-400">Answer Relevance</p>
-                    <h4 className="text-2xl font-bold text-indigo-400 mt-1">88%</h4>
-                    <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden mt-3">
-                      <div className="h-full bg-indigo-500" style={{ width: "88%" }}></div>
-                    </div>
-                  </div>
-                  <div className="p-4 border border-slate-900 rounded-lg bg-slate-950/20 text-center">
-                    <p className="text-xs text-slate-400">Context Recall</p>
-                    <h4 className="text-2xl font-bold text-amber-500 mt-1">90%</h4>
-                    <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden mt-3">
-                      <div className="h-full bg-amber-500" style={{ width: "90%" }}></div>
-                    </div>
-                  </div>
+                  {(() => {
+                    const completed = jobs.filter((j) => j.ragas_faithfulness != null);
+                    const avg = (key: keyof AuditJob) =>
+                      completed.length
+                        ? Math.round(completed.reduce((a, j) => a + (Number(j[key]) || 0), 0) / completed.length * 100)
+                        : null;
+                    return [
+                      { label: "Faithfulness", val: avg("ragas_faithfulness"), color: "emerald" },
+                      { label: "Answer Relevance", val: avg("ragas_relevance"), color: "indigo" },
+                      { label: "Context Recall", val: avg("ragas_recall"), color: "amber" },
+                    ].map(({ label, val, color }) => (
+                      <div key={label} className="p-4 border border-slate-900 rounded-lg bg-slate-950/20 text-center">
+                        <p className="text-xs text-slate-400">{label}</p>
+                        <h4 className={`text-2xl font-bold text-${color}-400 mt-1`}>
+                          {val != null ? `${val}%` : "—"}
+                        </h4>
+                        <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden mt-3">
+                          <div className={`h-full bg-${color}-500`} style={{ width: val ? `${val}%` : "0%" }} />
+                        </div>
+                      </div>
+                    ));
+                  })()}
                 </div>
               </div>
 
-              {/* Logger feed panel */}
-              <div className="glass-panel rounded-xl p-6 space-y-4">
-                <div className="flex justify-between items-center pb-2 border-b border-slate-900">
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Activity className="h-4.5 w-4.5 text-indigo-400" />
-                    Structured structlog JSON Traces
-                  </h3>
-                  <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Live Feed</span>
-                </div>
-
-                <div className="bg-black/40 border border-slate-900 rounded-xl p-4 font-mono text-[10px] text-slate-400 space-y-2 overflow-y-auto max-h-60 leading-relaxed">
-                  <p><span className="text-indigo-400">{"[2026-06-28T08:12:40Z]"}</span> <span className="text-emerald-500">INFO</span>: audit_job_trace: stage="evaluation_completed" job_id=1 faithfulness=0.76 relevance=0.78 recall=0.82</p>
-                  <p><span className="text-indigo-400">{"[2026-06-28T08:11:12Z]"}</span> <span className="text-amber-500">WARN</span>: ragas_library_fallback: job_id=1 reason="No module named 'ragas'"</p>
-                  <p><span className="text-indigo-400">{"[2026-06-28T08:10:31Z]"}</span> <span className="text-indigo-400">INFO</span>: evaluation_started: job_id=1 size=2</p>
-                  <p><span className="text-indigo-400">{"[2026-06-28T08:08:59Z]"}</span> <span className="text-emerald-500">INFO</span>: worker_task_completed: document_id=1 status="COMPLETED"</p>
-                </div>
+              <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2 pb-3 border-b border-slate-900 mb-4">
+                  <Activity className="h-4 w-4 text-indigo-400" /> Per-Job Ragas Breakdown
+                </h3>
+                {jobs.filter((j) => j.ragas_faithfulness != null).length === 0 ? (
+                  <p className="text-slate-500 text-sm text-center py-8">No evaluated jobs yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {jobs.filter((j) => j.ragas_faithfulness != null).map((job) => (
+                      <div key={job.id} className="flex items-center justify-between p-3 border border-slate-900 rounded-lg text-xs">
+                        <span className="text-slate-400 font-mono">Job #{job.id}</span>
+                        <div className="flex gap-4 text-slate-300">
+                          <span>F: <b>{Math.round((job.ragas_faithfulness || 0) * 100)}%</b></span>
+                          <span>R: <b>{Math.round((job.ragas_relevance || 0) * 100)}%</b></span>
+                          <span>C: <b>{Math.round((job.ragas_recall || 0) * 100)}%</b></span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

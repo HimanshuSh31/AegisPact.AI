@@ -7,7 +7,7 @@ import {
   Shield, Upload, FileText, CheckCircle2,
   Clock, Database, ArrowRight, BookOpen, BarChart3,
   Activity, Play, UserCheck, Trash2, LogOut,
-  Loader2, AlertCircle, RefreshCw, CloudUpload, XCircle
+  Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
@@ -112,7 +112,7 @@ function DropZone({
       ) : (
         <>
           <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-indigo-950/50 border border-indigo-900/30">
-            <CloudUpload className="h-7 w-7 text-indigo-400" />
+            <UploadCloud className="h-7 w-7 text-indigo-400" />
           </div>
           <div>
             <p className="text-sm font-semibold text-slate-200">

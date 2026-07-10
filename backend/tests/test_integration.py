@@ -16,7 +16,7 @@ from app.models import (
     UserCreate, FrameworkCreate, AuditJobCreate, JobStatus,
     FindingStatus, User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding
 )
-from app.main import register, create_framework
+from app.auth import get_password_hash
 from app.worker import async_process_document, async_run_audit_job
 from sqlmodel import select
 
@@ -110,7 +110,7 @@ async def run_integration_test():
     with patch("pdfplumber.open", new=get_mock_pdfplumber_open(mock_pages)):
         
         async with async_session_maker() as db:
-            # 1. Simulate Organization & User Registration
+            # 1. Simulate Organization & User Registration (direct DB, no HTTP layer)
             logger.info("Step 1: Simulating user registration...")
             user_in = UserCreate(
                 email="auditor@acme.corp",
@@ -118,10 +118,22 @@ async def run_integration_test():
                 full_name="Jane Doe",
                 organization_name="Acme Corp"
             )
-            user = await register(user_in, db)
+            org = Organization(name=user_in.organization_name)
+            db.add(org)
+            await db.flush()
+            user = User(
+                email=user_in.email,
+                hashed_password=get_password_hash(user_in.password),
+                full_name=user_in.full_name,
+                organization_id=org.id,
+                is_admin=True
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
             logger.info(f"Registered user: {user.full_name} under Org ID {user.organization_id}")
 
-            # 2. Simulate Compliance Framework Setup
+            # 2. Simulate Compliance Framework Setup (direct DB, no HTTP layer)
             logger.info("Step 2: Simulating Compliance Framework creation...")
             framework_in = FrameworkCreate(
                 name="GDPR Compliance Framework",
@@ -139,7 +151,14 @@ async def run_integration_test():
                     }
                 ]
             )
-            framework = await create_framework(framework_data=framework_in, db=db)
+            framework = ComplianceFramework(
+                name=framework_in.name,
+                description=framework_in.description,
+                rules=framework_in.rules
+            )
+            db.add(framework)
+            await db.commit()
+            await db.refresh(framework)
             logger.info(f"Created Compliance Framework: {framework.name} with {len(framework.rules)} rules.")
 
             # 3. Simulate File Upload & Ingestion Registry

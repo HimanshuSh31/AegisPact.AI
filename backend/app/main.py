@@ -6,12 +6,14 @@ from datetime import datetime
 from typing import List, Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
+import redis.asyncio as aioredis
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request, Response, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi import APIRouter
-from sqlmodel import select
+from sqlmodel import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Rate limiting
@@ -22,6 +24,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
 from app.database import get_db, init_db
+from app.logger import get_logger
 from app.models import (
     User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding,
     UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, JobStatus, DocumentRead
@@ -32,20 +35,42 @@ from app.auth import (
 from app.worker import process_document_task, run_audit_job_task
 from app.middleware import RequestIDMiddleware
 
+log = get_logger(__name__)
+
 # ---------------------------------------------------------
-# Rate Limiter
+# Rate Limiter — Redis-backed with in-memory fallback
 # ---------------------------------------------------------
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["200/minute"],
-    storage_uri="memory://",    # swap to "redis://localhost:6379" in production
-    headers_enabled=True,
-)
+def _build_limiter() -> Limiter:
+    """Try Redis-backed storage; fall back to memory if Redis is unavailable."""
+    try:
+        import redis as _redis_sync
+        r = _redis_sync.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+        r.ping()
+        log.info("rate_limiter_backend", backend="redis", url=settings.REDIS_URL)
+        return Limiter(
+            key_func=get_remote_address,
+            default_limits=["200/minute"],
+            storage_uri=settings.REDIS_URL,
+            headers_enabled=True,
+        )
+    except Exception:
+        log.warning("rate_limiter_backend", backend="memory",
+                    reason="Redis unavailable — using in-process store")
+        return Limiter(
+            key_func=get_remote_address,
+            default_limits=["200/minute"],
+            storage_uri="memory://",
+            headers_enabled=True,
+        )
+
+limiter = _build_limiter()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("startup", service="AegisPact.AI API", version="1.0.0")
     await init_db()
     yield
+    log.info("shutdown", service="AegisPact.AI API")
 
 # ---------------------------------------------------------
 # FastAPI App
@@ -169,18 +194,63 @@ audit_stream = AuditStreamManager()
 v1 = APIRouter(prefix="/api/v1")
 
 # ---------------------------------------------------------
-# Health Check — 60/minute
+# Health Check — probes DB, Redis, Qdrant — 60/minute
 # ---------------------------------------------------------
 
 @v1.get("/health", summary="Health Check", tags=["System"])
 @limiter.limit("60/minute")
-async def health_check(request: Request, response: Response):
+async def health_check(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    services: dict[str, dict] = {}
+
+    # 1. Database probe
+    try:
+        await db.execute(text("SELECT 1"))
+        services["database"] = {"status": "healthy", "backend": "SQLite/PostgreSQL"}
+    except Exception as exc:
+        services["database"] = {"status": "unhealthy", "error": str(exc)}
+        log.error("health_check_db_failed", exc_info=True)
+
+    # 2. Redis probe
+    try:
+        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+        await r.ping()
+        await r.aclose()
+        services["redis"] = {"status": "healthy", "url": settings.REDIS_URL}
+    except Exception as exc:
+        services["redis"] = {"status": "unavailable", "detail": "offline — using memory fallback"}
+        log.warning("health_check_redis_offline", error=str(exc))
+
+    # 3. Qdrant probe
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{settings.QDRANT_URL}/healthz")
+            if r.status_code == 200:
+                services["qdrant"] = {"status": "healthy", "url": settings.QDRANT_URL}
+            else:
+                services["qdrant"] = {"status": "degraded", "http_status": r.status_code}
+    except Exception as exc:
+        services["qdrant"] = {"status": "unavailable", "detail": str(exc)}
+        log.warning("health_check_qdrant_offline", error=str(exc))
+
+    overall = "healthy" if all(
+        s["status"] in ("healthy", "unavailable") for s in services.values()
+    ) else "degraded"
+
+    if overall != "healthy":
+        response.status_code = 503
+
     return {
-        "status": "healthy",
+        "status": overall,
         "version": "1.0.0",
         "service": "AegisPact.AI API",
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "services": services,
     }
+
 
 # ---------------------------------------------------------
 # Auth — 10/minute (brute-force protection)

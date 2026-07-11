@@ -1,358 +1,370 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { 
-  ArrowLeft, Shield, AlertCircle, AlertTriangle, CheckCircle2, 
-  HelpCircle, Scale, FileText, ChevronRight, CornerDownRight, 
-  Bookmark, BarChart3, Star, Layers, ScrollText
+import { useParams, useRouter } from "next/navigation";
+import {
+  Shield, ArrowLeft, CheckCircle2, XCircle, AlertTriangle,
+  MinusCircle, BarChart3, FileText, Clock, Loader2,
+  Activity, BookOpen, ChevronDown, ChevronUp
 } from "lucide-react";
+import { auditsApi, documentsApi, frameworksApi, type AuditJob, type AuditFinding, type Document, type Framework } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { AuditHeaderSkeleton, FindingCardSkeleton } from "@/lib/skeletons";
+import { useToast } from "@/lib/toast";
 
-// Mock Detailed Audit Result Data for simulated fetch
-const MOCK_AUDIT_REPORT = {
-  id: 101,
-  document: {
-    id: 2,
-    name: "gdpr_data_processing_addendum.pdf",
-    size: "820 KB",
-    type: "PDF",
-    text_content: [
-      {
-        page: 1,
-        content: `ACME CORPORATION - DATA PROCESSING ADDENDUM
-Effective Date: March 15, 2026
+// ─── Verdict config ───────────────────────────────────────
 
-This Data Processing Addendum ("DPA") supplements the Master Services Agreement ("Agreement") between Acme Corporation ("Acme") and the customer party ("Customer").
-
-1. DEFINITIONS AND APPLICABILITY
-"GDPR" means the General Data Protection Regulation (Regulation (EU) 2016/679).
-"Personal Data" means any information relating to an identified or identifiable natural person processed under the Agreement.
-
-2. DATA PROCESSING LAWFULNESS (GDPR Art. 6)
-Acme processes Personal Data solely to perform the services detailed in Section 3 of this agreement. 
-[CITATION_1]: Acme does not obtain user consent explicitly before tracking user geolocation data, relying solely on corporate system configuration default settings. Users may configure location tracking status on their device settings.`
-      },
-      {
-        page: 2,
-        content: `3. TRANFERS TO THIRD PARTIES (GDPR Art. 13)
-[CITATION_2]: Personal Data processed under this agreement may be shared with the following subprocessors:
-- Analytics Inc. (Telemetry Processing, Delaware, USA)
-- Marketing LLC. (Targeted Email Infrastructure, California, USA)
-
-4. TECHNICAL AND ORGANIZATIONAL MEASURES (GDPR Art. 32)
-Acme shall implement administrative, physical, and technical safeguards. All storage servers are hosted in public cloud facilities. Backups are performed periodically, though encryption key rotation is scheduled manually once every eighteen months.
-
-5. RETENTION AND DELETION
-Upon termination, Acme will delete customer personal data within 180 days, unless statutory preservation requirements prevent deletion.`
-      }
-    ]
+const VERDICT = {
+  COMPLIANT: {
+    label: "Compliant",
+    icon: <CheckCircle2 className="h-4 w-4" />,
+    pill: "bg-emerald-950/50 text-emerald-400 border-emerald-900/40",
+    bar:  "bg-emerald-500",
+    text: "text-emerald-400",
   },
-  framework: {
-    name: "GDPR Compliance Framework",
-    description: "General Data Protection Regulation audit checks for corporate vendor agreements."
+  NON_COMPLIANT: {
+    label: "Non-Compliant",
+    icon: <XCircle className="h-4 w-4" />,
+    pill: "bg-rose-950/50 text-rose-400 border-rose-900/40",
+    bar:  "bg-rose-500",
+    text: "text-rose-400",
   },
-  score: 66.7, // 2 out of 3 rules compliant/warning
-  eval: {
-    faithfulness: 0.94,
-    relevance: 0.91,
-    recall: 0.89
+  NEEDS_REVIEW: {
+    label: "Needs Review",
+    icon: <AlertTriangle className="h-4 w-4" />,
+    pill: "bg-amber-950/50 text-amber-400 border-amber-900/40",
+    bar:  "bg-amber-500",
+    text: "text-amber-400",
   },
-  findings: [
-    {
-      id: "f1",
-      rule_id: "GDPR-Art6",
-      title: "Lawfulness of Processing (Consent)",
-      status: "NON_COMPLIANT",
-      severity: "HIGH",
-      page: 1,
-      clause: "Acme does not obtain user consent explicitly before tracking user geolocation data, relying solely on corporate system configuration default settings.",
-      explanation: "GDPR Article 6 requires explicit consent or a documented legitimate interest prior to processing sensitive telemetry/location data. Defaulting tracking configuration without consent is non-compliant."
-    },
-    {
-      id: "f2",
-      rule_id: "GDPR-Art13",
-      title: "Provision of Subprocessor Records",
-      status: "COMPLIANT",
-      severity: "INFO",
-      page: 2,
-      clause: "Personal Data processed under this agreement may be shared with the following subprocessors:\n- Analytics Inc. (Telemetry Processing, Delaware, USA)\n- Marketing LLC. (Targeted Email Infrastructure, California, USA)",
-      explanation: "GDPR Article 13 requires transparency regarding the recipients of personal data. The contract clearly lists the subprocessors, their purpose, and geolocation."
-    },
-    {
-      id: "f3",
-      rule_id: "GDPR-Art32",
-      title: "Security of Processing (Encryption Key Rotation)",
-      status: "WARNING",
-      severity: "MEDIUM",
-      page: 2,
-      clause: "Backups are performed periodically, though encryption key rotation is scheduled manually once every eighteen months.",
-      explanation: "Manual key rotation scheduled at an interval of 18 months represents a safety risk. Best practices suggest automated rotation cycles at least once every 12 months."
-    }
-  ]
+  NOT_APPLICABLE: {
+    label: "N/A",
+    icon: <MinusCircle className="h-4 w-4" />,
+    pill: "bg-slate-900 text-slate-400 border-slate-800",
+    bar:  "bg-slate-600",
+    text: "text-slate-400",
+  },
 };
 
-export default function AuditReportView({ params }: { params: { id: string } }) {
-  const report = MOCK_AUDIT_REPORT; // Simulate fetching by params.id
-  const [activeTab, setActiveTab] = useState<"findings" | "scorecard">("findings");
-  const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
-  const [highlightedText, setHighlightedText] = useState<string | null>(null);
-  const pageRefs = useRef<{ [key: number]: HTMLDivElement | null }>({});
+// ─── Finding Card ─────────────────────────────────────────
 
-  const handleFindingClick = (finding: typeof report.findings[0]) => {
-    setSelectedFindingId(finding.id);
-    setHighlightedText(finding.clause);
-    
-    // Smooth scroll to the corresponding page in the left pane
-    const element = pageRefs.current[finding.page];
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  };
-
-  // Helper function to render text content and highlight active citations
-  const renderPageText = (text: string) => {
-    if (!highlightedText) return text;
-    
-    // Check if the current paragraph contains the citation snippet
-    const parts = text.split(highlightedText);
-    if (parts.length > 1) {
-      return (
-        <>
-          {parts[0]}
-          <span className="bg-indigo-900/60 border border-indigo-500 text-indigo-100 rounded px-1 font-medium transition-all duration-300 shadow-sm shadow-indigo-500/20">
-            {highlightedText}
-          </span>
-          {parts[1]}
-        </>
-      );
-    }
-    return text;
-  };
+function FindingCard({ finding }: { finding: AuditFinding }) {
+  const [expanded, setExpanded] = useState(false);
+  const v = VERDICT[finding.verdict] ?? VERDICT.NOT_APPLICABLE;
 
   return (
-    <div className="flex h-screen flex-col bg-slate-950 text-slate-100 font-sans overflow-hidden">
-      {/* Top Header */}
-      <header className="flex h-16 items-center justify-between border-b border-slate-900 bg-slate-950/70 px-6 backdrop-blur-md">
-        <div className="flex items-center gap-4">
-          <Link 
-            href="/" 
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white transition-colors"
-          >
-            <ArrowLeft className="h-4.5 w-4.5" />
-          </Link>
-          <div className="h-4 w-px bg-slate-800"></div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-slate-200 text-sm">{report.document.name}</span>
-              <span className="rounded-full bg-slate-900 border border-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-400">
-                {report.document.type}
-              </span>
+    <div className="rounded-xl border border-slate-900 bg-slate-900/20 overflow-hidden transition-all hover:border-slate-800">
+      {/* Header row */}
+      <button
+        className="w-full flex items-center justify-between gap-4 px-5 py-4 text-left hover:bg-slate-900/30 transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <span className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-bold shrink-0 ${v.pill}`}>
+            {v.icon}{v.label}
+          </span>
+          <span className="font-mono text-[11px] font-bold text-indigo-400 shrink-0 hidden sm:block">
+            {finding.rule_id}
+          </span>
+          <span className="text-sm font-semibold text-slate-200 truncate">{finding.rule_title}</span>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {finding.page_number != null && (
+            <span className="text-[10px] text-slate-500 hidden md:block">Page {finding.page_number}</span>
+          )}
+          {expanded
+            ? <ChevronUp className="h-4 w-4 text-slate-500" />
+            : <ChevronDown className="h-4 w-4 text-slate-500" />
+          }
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="px-5 pb-5 space-y-4 border-t border-slate-900/60 pt-4">
+          {finding.clause_text && (
+            <div>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                📋 Cited Contract Clause
+              </p>
+              <blockquote className="border-l-2 border-indigo-600/50 bg-indigo-950/10 rounded-r-lg px-4 py-3 text-sm text-slate-300 italic leading-relaxed">
+                "{finding.clause_text}"
+              </blockquote>
             </div>
-            <p className="text-[10px] text-slate-500">Framework: {report.framework.name}</p>
+          )}
+          <div>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+              🤖 AI Compliance Reasoning
+            </p>
+            <p className="text-sm text-slate-300 leading-relaxed">{finding.explanation}</p>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
 
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-slate-400">Compliance Score:</span>
-            <span className="rounded bg-indigo-950/80 border border-indigo-900/40 px-2.5 py-1 font-bold text-indigo-400">
-              {report.score}%
-            </span>
+// ─── Score Ring ───────────────────────────────────────────
+
+function ScoreRing({ score }: { score: number }) {
+  const r = 40;
+  const circ = 2 * Math.PI * r;
+  const dash = (score / 100) * circ;
+  const color = score >= 80 ? "#10b981" : score >= 50 ? "#f59e0b" : "#ef4444";
+
+  return (
+    <div className="relative flex items-center justify-center">
+      <svg width="100" height="100" className="-rotate-90">
+        <circle cx="50" cy="50" r={r} stroke="#1e293b" strokeWidth="8" fill="none" />
+        <circle
+          cx="50" cy="50" r={r}
+          stroke={color} strokeWidth="8" fill="none"
+          strokeDasharray={`${dash} ${circ}`}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dasharray 1s ease" }}
+        />
+      </svg>
+      <div className="absolute text-center">
+        <p className="text-xl font-bold text-white">{score.toFixed(0)}%</p>
+        <p className="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Score</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Ragas Bar ────────────────────────────────────────────
+
+function RagasBar({ label, value }: { label: string; value: number }) {
+  const pct = Math.round(value * 100);
+  return (
+    <div>
+      <div className="flex justify-between text-xs mb-1.5">
+        <span className="text-slate-400">{label}</span>
+        <span className="font-bold text-white">{pct}%</span>
+      </div>
+      <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full transition-all duration-700"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────
+
+export default function AuditFindingsPage() {
+  const params = useParams();
+  const router = useRouter();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { error: toastError } = useToast();
+
+  const jobId = Number(params.id);
+
+  const [job, setJob]           = useState<AuditJob | null>(null);
+  const [findings, setFindings] = useState<AuditFinding[]>([]);
+  const [document, setDocument] = useState<Document | null>(null);
+  const [framework, setFramework] = useState<Framework | null>(null);
+  const [loading, setLoading]   = useState(true);
+
+  // Filter state
+  const [filter, setFilter] = useState<"ALL" | "COMPLIANT" | "NON_COMPLIANT" | "NEEDS_REVIEW">("ALL");
+
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) router.push("/login");
+  }, [authLoading, isAuthenticated, router]);
+
+  const load = useCallback(async () => {
+    if (!isAuthenticated) return;
+    setLoading(true);
+    try {
+      const [j, f] = await Promise.all([
+        auditsApi.get(jobId),
+        auditsApi.findings(jobId),
+      ]);
+      setJob(j);
+      setFindings(f);
+
+      // Load related doc & framework in background
+      const [doc, fw] = await Promise.all([
+        documentsApi.get(j.document_id).catch(() => null),
+        frameworksApi.list().then(list => list.find(x => x.id === j.framework_id) ?? null),
+      ]);
+      setDocument(doc);
+      setFramework(fw ?? null);
+    } catch (e: any) {
+      toastError("Failed to load audit", e?.message || "Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [jobId, isAuthenticated, toastError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = findings.filter(f => filter === "ALL" || f.verdict === filter);
+
+  const counts = {
+    COMPLIANT:      findings.filter(f => f.verdict === "COMPLIANT").length,
+    NON_COMPLIANT:  findings.filter(f => f.verdict === "NON_COMPLIANT").length,
+    NEEDS_REVIEW:   findings.filter(f => f.verdict === "NEEDS_REVIEW").length,
+    NOT_APPLICABLE: findings.filter(f => f.verdict === "NOT_APPLICABLE").length,
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      {/* Top nav */}
+      <header className="sticky top-0 z-30 flex items-center gap-4 border-b border-slate-900 bg-slate-950/80 backdrop-blur-xl px-6 py-4">
+        <Link
+          href="/"
+          className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm"
+        >
+          <ArrowLeft className="h-4 w-4" /> Dashboard
+        </Link>
+        <div className="h-4 w-px bg-slate-800" />
+        <div className="flex items-center gap-2">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600/20 border border-indigo-900/40">
+            <Shield className="h-4 w-4 text-indigo-400" />
           </div>
+          <span className="text-sm font-semibold text-slate-200">
+            Audit Job #{jobId}
+          </span>
+          {job && (
+            <span className={`ml-1 rounded-full border px-2 py-0.5 text-[10px] font-bold ${
+              job.status === "COMPLETED"
+                ? "border-emerald-900/40 bg-emerald-950/40 text-emerald-400"
+                : "border-amber-900/30 bg-amber-950/30 text-amber-400"
+            }`}>
+              {job.status}
+            </span>
+          )}
         </div>
       </header>
 
-      {/* Main Split Screen */}
-      <div className="flex flex-1 overflow-hidden">
-        
-        {/* Left Panel: Legal Document Viewer (6 Columns) */}
-        <main className="w-[50%] overflow-y-auto p-8 border-r border-slate-900 bg-[#06090f]/70">
-          <div className="max-w-2xl mx-auto flex flex-col gap-8">
-            <div className="flex items-center justify-between text-xs text-slate-500 uppercase tracking-widest font-semibold pb-2 border-b border-slate-900">
-              <span>Document Text Manifest</span>
-              <span className="flex items-center gap-1.5"><ScrollText className="h-4 w-4" /> Layout Coordinates Active</span>
-            </div>
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
 
-            {report.document.text_content.map((pageData) => (
-              <div 
-                key={pageData.page}
-                ref={(el) => { pageRefs.current[pageData.page] = el; }}
-                className="relative rounded-xl border border-slate-900 bg-slate-950/40 p-8 shadow-sm transition-all duration-300"
-              >
-                {/* Page Number Badge */}
-                <div className="absolute top-4 right-4 flex h-6 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono font-bold text-slate-500">
-                  PAGE {pageData.page}
+        {/* ── Header Card ── */}
+        {loading ? (
+          <AuditHeaderSkeleton />
+        ) : job ? (
+          <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6">
+            <div className="flex flex-col sm:flex-row sm:items-start gap-6">
+              {/* Score ring */}
+              {job.compliance_score != null && (
+                <div className="shrink-0">
+                  <ScoreRing score={job.compliance_score} />
                 </div>
+              )}
 
-                {/* Page Content */}
-                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-slate-300 font-light select-text">
-                  {renderPageText(pageData.content)}
-                </pre>
-              </div>
-            ))}
-          </div>
-        </main>
-
-        {/* Right Panel: Audit Scorecard & Findings (6 Columns) */}
-        <section className="w-[50%] flex flex-col overflow-hidden bg-slate-950">
-          {/* Tabs */}
-          <div className="flex border-b border-slate-900 bg-slate-950/50">
-            <button 
-              onClick={() => setActiveTab("findings")}
-              className={`flex-1 py-4 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 border-b-2 transition-all ${
-                activeTab === "findings" 
-                  ? "border-indigo-500 text-indigo-400 bg-indigo-950/5" 
-                  : "border-transparent text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Shield className="h-4.5 w-4.5" />
-              Compliance Findings ({report.findings.length})
-            </button>
-            <button 
-              onClick={() => setActiveTab("scorecard")}
-              className={`flex-1 py-4 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 border-b-2 transition-all ${
-                activeTab === "scorecard" 
-                  ? "border-indigo-500 text-indigo-400 bg-indigo-950/5" 
-                  : "border-transparent text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <BarChart3 className="h-4.5 w-4.5" />
-              MLOps Ragas Scorecard
-            </button>
-          </div>
-
-          {/* Tab Contents */}
-          <div className="flex-1 overflow-y-auto p-6 lg:p-8">
-            
-            {/* Findings Tab */}
-            {activeTab === "findings" && (
-              <div className="flex flex-col gap-6">
-                <div className="rounded-xl border border-slate-900 bg-slate-950/60 p-4 text-xs text-slate-400 leading-relaxed">
-                  <span className="font-semibold text-slate-200 block mb-1">Interactive Verification:</span>
-                  Click on any non-compliance finding below to automatically highlight the corresponding contract clause citation and scroll the document viewer.
-                </div>
-
-                {report.findings.map((finding) => (
-                  <div 
-                    key={finding.id}
-                    onClick={() => handleFindingClick(finding)}
-                    className={`rounded-xl border p-5 text-left transition-all cursor-pointer glass-card ${
-                      selectedFindingId === finding.id 
-                        ? "border-indigo-500/50 bg-indigo-950/15" 
-                        : "border-slate-900 bg-slate-950/20"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3 mb-3">
-                      <div>
-                        <span className="font-mono text-[10px] text-slate-500 uppercase block mb-1 font-bold">{finding.rule_id}</span>
-                        <h3 className="font-bold text-slate-200 text-sm">{finding.title}</h3>
-                      </div>
-                      
-                      {/* Status Tag */}
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
-                        finding.status === "COMPLIANT" 
-                          ? "bg-emerald-950/50 text-emerald-400 border border-emerald-900/40" 
-                          : finding.status === "WARNING"
-                          ? "bg-amber-950/50 text-amber-400 border border-amber-900/40"
-                          : "bg-rose-950/50 text-rose-400 border border-rose-900/40"
-                      }`}>
-                        {finding.status === "COMPLIANT" && <CheckCircle2 className="h-3 w-3" />}
-                        {finding.status === "WARNING" && <AlertTriangle className="h-3 w-3" />}
-                        {finding.status === "NON_COMPLIANT" && <AlertCircle className="h-3 w-3" />}
-                        {finding.status}
-                      </span>
-                    </div>
-
-                    <p className="text-xs text-slate-400 leading-relaxed mb-4">{finding.explanation}</p>
-
-                    {/* Citation block */}
-                    <div className="rounded-lg border border-slate-900 bg-slate-950/80 p-3.5 flex flex-col gap-2">
-                      <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase">
-                        <Bookmark className="h-3.5 w-3.5 text-indigo-400" />
-                        Verbatim Citation (Page {finding.page})
-                      </div>
-                      <blockquote className="text-xs italic text-indigo-300 font-light pl-3.5 border-l border-slate-800">
-                        "{finding.clause}"
-                      </blockquote>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Scorecard Tab */}
-            {activeTab === "scorecard" && (
-              <div className="flex flex-col gap-8">
-                
-                {/* Score Summary Gauge */}
-                <div className="rounded-xl border border-slate-900 bg-slate-900/10 p-6 flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-200 mb-1">Contract Health Score</h3>
-                    <p className="text-xs text-slate-400 pr-4">Derived from total criteria compliance status. 100% compliance is optimal.</p>
-                  </div>
-                  <div className="flex h-20 w-20 flex-col items-center justify-center rounded-full border-4 border-indigo-600/40 bg-indigo-950/20 shadow-lg shadow-indigo-950/30">
-                    <span className="text-xl font-bold text-white">{report.score}%</span>
-                    <span className="text-[9px] font-semibold text-indigo-400 tracking-wider">HEALTH</span>
-                  </div>
-                </div>
-
-                {/* Ragas Metrics */}
+              {/* Meta */}
+              <div className="flex-1 space-y-4">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-4 flex items-center gap-2">
-                    <Scale className="h-4.5 w-4.5 text-indigo-400" />
-                    Ragas Hallucination & Quality Metrics
-                  </h3>
+                  <h1 className="text-lg font-bold text-white">
+                    {document?.name ?? `Document #${job.document_id}`}
+                  </h1>
+                  <p className="text-sm text-slate-400 mt-0.5 flex items-center gap-2">
+                    <BookOpen className="h-3.5 w-3.5" />
+                    {framework?.name ?? `Framework #${job.framework_id}`}
+                  </p>
+                </div>
 
-                  <div className="grid gap-6">
-                    {/* Faithfulness */}
-                    <div className="rounded-xl border border-slate-900 bg-slate-950/20 p-5">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-slate-200">Faithfulness Index</span>
-                        <span className="text-sm font-bold text-emerald-400">{Math.round(report.eval.faithfulness * 100)}%</span>
-                      </div>
-                      <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden mb-3">
-                        <div className="h-full bg-emerald-500" style={{ width: `${report.eval.faithfulness * 100}%` }}></div>
-                      </div>
-                      <p className="text-[11px] text-slate-400 leading-relaxed">
-                        Measures whether the compliance findings explanations are grounded *only* in the retrieved contract clauses. A score of 94% indicates high factual fidelity.
-                      </p>
+                {/* Verdict counts */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { label: "Compliant",     val: counts.COMPLIANT,      color: "text-emerald-400" },
+                    { label: "Non-Compliant", val: counts.NON_COMPLIANT,  color: "text-rose-400" },
+                    { label: "Needs Review",  val: counts.NEEDS_REVIEW,   color: "text-amber-400" },
+                    { label: "N/A",           val: counts.NOT_APPLICABLE, color: "text-slate-400" },
+                  ].map(({ label, val, color }) => (
+                    <div key={label} className="rounded-lg border border-slate-900 bg-slate-950/40 px-3 py-2.5 text-center">
+                      <p className={`text-xl font-bold ${color}`}>{val}</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">{label}</p>
                     </div>
-
-                    {/* Answer Relevance */}
-                    <div className="rounded-xl border border-slate-900 bg-slate-950/20 p-5">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-slate-200">Answer Relevance</span>
-                        <span className="text-sm font-bold text-indigo-400">{Math.round(report.eval.relevance * 100)}%</span>
-                      </div>
-                      <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden mb-3">
-                        <div className="h-full bg-indigo-500" style={{ width: `${report.eval.relevance * 100}%` }}></div>
-                      </div>
-                      <p className="text-[11px] text-slate-400 leading-relaxed">
-                        Measures whether the auditing explanations directly address the framework rule criteria. A score of 91% guarantees focus.
-                      </p>
-                    </div>
-
-                    {/* Context Recall */}
-                    <div className="rounded-xl border border-slate-900 bg-slate-950/20 p-5">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-slate-200">Context Recall</span>
-                        <span className="text-sm font-bold text-amber-400">{Math.round(report.eval.recall * 100)}%</span>
-                      </div>
-                      <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden mb-3">
-                        <div className="h-full bg-amber-500" style={{ width: `${report.eval.recall * 100}%` }}></div>
-                      </div>
-                      <p className="text-[11px] text-slate-400 leading-relaxed">
-                        Measures if the Hybrid retrieval engine successfully fetched all correct contract clauses to audit the specific framework rules.
-                      </p>
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </div>
-            )}
 
+              {/* Ragas metrics */}
+              {job.ragas_faithfulness != null && (
+                <div className="shrink-0 w-full sm:w-52 space-y-3 p-4 rounded-lg border border-slate-900 bg-slate-950/20">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                    <BarChart3 className="h-3 w-3" /> Ragas Quality
+                  </p>
+                  <RagasBar label="Faithfulness"     value={job.ragas_faithfulness ?? 0} />
+                  <RagasBar label="Answer Relevance" value={job.ragas_relevance ?? 0} />
+                  <RagasBar label="Context Recall"   value={job.ragas_recall ?? 0} />
+                </div>
+              )}
+            </div>
           </div>
+        ) : null}
+
+        {/* ── Filter tabs ── */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mr-2">Filter:</p>
+          {(["ALL", "NON_COMPLIANT", "NEEDS_REVIEW", "COMPLIANT"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
+                filter === f
+                  ? "border-indigo-600 bg-indigo-950/40 text-indigo-300"
+                  : "border-slate-800 text-slate-400 hover:border-slate-700 hover:text-white"
+              }`}
+            >
+              {f === "ALL" ? `All (${findings.length})` : f.replace("_", " ")}
+              {f !== "ALL" && ` (${counts[f] ?? 0})`}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Findings list ── */}
+        <section className="space-y-3">
+          {loading ? (
+            Array.from({ length: 4 }).map((_, i) => <FindingCardSkeleton key={i} />)
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 rounded-xl border border-slate-900 bg-slate-900/20">
+              <FileText className="h-10 w-10 text-slate-700 mx-auto mb-3" />
+              <p className="text-slate-500 text-sm">
+                {findings.length === 0
+                  ? "No findings yet — audit may still be running."
+                  : `No findings matching "${filter}"`}
+              </p>
+            </div>
+          ) : (
+            filtered.map((f) => <FindingCard key={f.id} finding={f} />)
+          )}
         </section>
 
+        {/* ── Document context ── */}
+        {document && (
+          <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-5 flex items-center gap-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-950/50 border border-indigo-900/30 shrink-0">
+              <FileText className="h-5 w-5 text-indigo-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-slate-200 truncate">{document.name}</p>
+              <p className="text-xs text-slate-500">
+                {document.file_type} · {(document.size_bytes / 1024).toFixed(1)} KB ·{" "}
+                <span className={document.status === "COMPLETED" ? "text-emerald-400" : "text-amber-400"}>
+                  {document.status}
+                </span>
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-slate-500 shrink-0">
+              <Clock className="h-3.5 w-3.5" />
+              {new Date(job?.created_at ?? "").toLocaleDateString()}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

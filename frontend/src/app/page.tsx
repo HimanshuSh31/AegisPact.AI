@@ -6,11 +6,13 @@ import { useRouter } from "next/navigation";
 import {
   Shield, Upload, FileText, CheckCircle2,
   Clock, Database, ArrowRight, BookOpen, BarChart3,
-  Activity, Play, UserCheck, Trash2, LogOut,
+  Activity, Play, UserCheck, LogOut, Menu, X,
   Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/lib/toast";
+import { StatCardSkeleton, DocumentRowSkeleton, TableRowSkeleton } from "@/lib/skeletons";
 import {
   documentsApi, frameworksApi, auditsApi,
   type Document, type Framework, type AuditJob
@@ -188,15 +190,16 @@ function ProgressStream({
 export default function Dashboard() {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
+  const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
 
   const [currentView, setCurrentView] = useState<"dashboard" | "contracts" | "frameworks" | "ragas">("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // API data
   const [documents, setDocuments] = useState<Document[]>([]);
   const [frameworks, setFrameworks] = useState<Framework[]>([]);
   const [jobs, setJobs] = useState<AuditJob[]>([]);
   const [apiLoading, setApiLoading] = useState(true);
-  const [apiError, setApiError] = useState<string | null>(null);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -219,7 +222,6 @@ export default function Dashboard() {
   const loadData = useCallback(async () => {
     if (!isAuthenticated) return;
     setApiLoading(true);
-    setApiError(null);
     try {
       const [docs, fws] = await Promise.all([
         documentsApi.list(),
@@ -228,11 +230,11 @@ export default function Dashboard() {
       setDocuments(docs);
       setFrameworks(fws);
     } catch (e: any) {
-      setApiError(e?.message || "Failed to load data from API.");
+      toastError("Failed to load data", e?.message || "Check your connection and try again.");
     } finally {
       setApiLoading(false);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, toastError]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -240,12 +242,9 @@ export default function Dashboard() {
   const handleFileUpload = useCallback(async (file: File) => {
     setIsUploading(true);
     setUploadProgress(10);
-
-    // Simulated progress ticks while upload runs
     const interval = setInterval(() => {
       setUploadProgress((p) => Math.min(p + 12, 85));
     }, 300);
-
     try {
       const doc = await documentsApi.upload(file);
       clearInterval(interval);
@@ -255,39 +254,41 @@ export default function Dashboard() {
         setIsUploading(false);
         setUploadProgress(0);
         setSelectedDocId(doc.id);
+        toastSuccess("Document uploaded", `"${doc.name}" is being parsed.`);
       }, 400);
     } catch (e: any) {
       clearInterval(interval);
       setIsUploading(false);
       setUploadProgress(0);
-      setApiError(e?.message || "Upload failed. Please try again.");
+      toastError("Upload failed", e?.message || "Only PDF, DOCX, TXT files up to 50 MB.");
     }
-  }, []);
+  }, [toastSuccess, toastError]);
 
   // Trigger real audit
   const handleTriggerAudit = useCallback(async () => {
     if (!selectedDocId || !selectedFwId) return;
     setIsAuditing(true);
-    setApiError(null);
     try {
       const job = await auditsApi.run(Number(selectedDocId), Number(selectedFwId));
       setJobs((prev) => [job, ...prev]);
       setActiveJobId(job.id);
+      toastInfo("Audit dispatched", `Job #${job.id} is running in the background.`);
     } catch (e: any) {
       setIsAuditing(false);
-      setApiError(e?.message || "Failed to start audit job.");
+      toastError("Audit failed to start", e?.message || "Please try again.");
     }
-  }, [selectedDocId, selectedFwId]);
+  }, [selectedDocId, selectedFwId, toastInfo, toastError]);
 
   const handleAuditComplete = useCallback(async () => {
     if (!activeJobId) return;
     try {
       const updated = await auditsApi.get(activeJobId);
       setJobs((prev) => prev.map((j) => j.id === updated.id ? updated : j));
+      toastSuccess("Audit complete", updated.compliance_score != null ? `Compliance score: ${updated.compliance_score.toFixed(1)}%` : "View findings for details.");
     } catch {}
     setIsAuditing(false);
     setActiveJobId(null);
-  }, [activeJobId]);
+  }, [activeJobId, toastSuccess]);
 
   if (authLoading) {
     return (
@@ -300,20 +301,43 @@ export default function Dashboard() {
   return (
     <div className="flex min-h-screen bg-slate-950 font-sans text-slate-100">
 
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-slate-900 bg-slate-950/80 p-6 flex flex-col gap-8 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600 shadow-lg shadow-indigo-600/30">
-            <Shield className="h-6 w-6 text-white" />
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div
+          className="sidebar-overlay lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — hidden on mobile, slide-over when open */}
+      <aside className={`
+        fixed lg:static inset-y-0 left-0 z-50
+        w-64 border-r border-slate-900 bg-slate-950 lg:bg-slate-950/80
+        p-6 flex flex-col gap-8 shrink-0
+        transition-transform duration-300 ease-in-out
+        ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
+      `}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600 shadow-lg shadow-indigo-600/30">
+              <Shield className="h-6 w-6 text-white" />
+            </div>
+            <div>
+              <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+                AEGISPACT
+              </span>
+              <span className="text-xs block text-indigo-500 font-semibold tracking-widest uppercase">
+                AUDITOR
+              </span>
+            </div>
           </div>
-          <div>
-            <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
-              AEGISPACT
-            </span>
-            <span className="text-xs block text-indigo-500 font-semibold tracking-widest uppercase">
-              AUDITOR
-            </span>
-          </div>
+          {/* Close button — mobile only */}
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden text-slate-500 hover:text-white p-1"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
 
         <nav className="flex flex-col gap-1.5 flex-1">
@@ -326,7 +350,7 @@ export default function Dashboard() {
           ].map(({ id, icon: Icon, label }) => (
             <button
               key={id}
-              onClick={() => setCurrentView(id as any)}
+              onClick={() => { setCurrentView(id as any); setSidebarOpen(false); }}
               className={`flex w-full items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-all text-left ${
                 currentView === id
                   ? "bg-indigo-950/40 border border-indigo-900/30 text-indigo-200"
@@ -360,50 +384,53 @@ export default function Dashboard() {
       <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
 
         {/* Header */}
-        <header className="flex items-center justify-between border-b border-slate-900 px-8 py-5 shrink-0 bg-slate-950/40">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white capitalize">
-              {currentView === "dashboard" && "Compliance Workspace"}
-              {currentView === "contracts" && "Ingested Legal Agreements"}
-              {currentView === "frameworks" && "Audit Policy Frameworks"}
-              {currentView === "ragas" && "MLOps Ragas Quality Monitor"}
-            </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
-              {currentView === "dashboard" && "Upload contracts, trigger RAG audits, and track live Celery job progress."}
-              {currentView === "contracts" && "Manage uploaded documents and parsed structure manifests."}
-              {currentView === "frameworks" && "Manage policy control checklists and compliance rule configurations."}
-              {currentView === "ragas" && "Faithfulness, answer relevance, and context precision analysis."}
-            </p>
-          </div>
+        <header className="flex items-center justify-between border-b border-slate-900 px-4 sm:px-8 py-4 sm:py-5 shrink-0 bg-slate-950/40">
           <div className="flex items-center gap-3">
+            {/* Hamburger — mobile only */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="lg:hidden p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white transition-all"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div>
+              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white capitalize">
+                {currentView === "dashboard" && "Compliance Workspace"}
+                {currentView === "contracts" && "Legal Contracts"}
+                {currentView === "frameworks" && "Policy Frameworks"}
+                {currentView === "ragas" && "Ragas Monitor"}
+              </h1>
+              <p className="text-xs text-slate-400 mt-0.5 hidden sm:block">
+                {currentView === "dashboard" && "Upload contracts, trigger RAG audits, and track live Celery job progress."}
+                {currentView === "contracts" && "Manage uploaded documents and parsed structure manifests."}
+                {currentView === "frameworks" && "Manage policy control checklists and compliance rule configurations."}
+                {currentView === "ragas" && "Faithfulness, answer relevance, and context precision analysis."}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 sm:gap-3">
             <button onClick={loadData} className="p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all">
               <RefreshCw className="h-4 w-4" />
             </button>
-            <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3.5 py-1.5 text-xs text-slate-300">
+            <div className="hidden sm:flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3.5 py-1.5 text-xs text-slate-300">
               <UserCheck className="h-4 w-4 text-emerald-500" />
               Authenticated
             </div>
           </div>
         </header>
 
-        {/* Error Banner */}
-        {apiError && (
-          <div className="mx-8 mt-4 flex items-center gap-3 rounded-xl border border-rose-900/40 bg-rose-950/20 px-4 py-3 text-sm text-rose-400">
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            <span className="flex-1">{apiError}</span>
-            <button onClick={() => setApiError(null)}><XCircle className="h-4 w-4" /></button>
-          </div>
-        )}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-10">
 
           {/* ── DASHBOARD VIEW ── */}
           {currentView === "dashboard" && (
             <div className="space-y-8">
               {/* Stats Row */}
               <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-                {[
+                {apiLoading
+                  ? Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)
+                  : [
                   { label: "Contracts Ingested", value: String(documents.length), sub: "Files parsed" },
                   { label: "Active Audit Jobs", value: String(jobs.filter(j => j.status === "PROCESSING" || j.status === "PENDING").length), sub: "In Celery queue" },
                   { label: "Completed Audits", value: String(jobs.filter(j => j.status === "COMPLETED").length), sub: "Scorecards generated" },
@@ -411,7 +438,7 @@ export default function Dashboard() {
                 ].map(({ label, value, sub }) => (
                   <div key={label} className="rounded-xl border border-slate-900 bg-slate-900/30 p-6">
                     <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</p>
-                    <h3 className="text-3xl font-bold text-white mt-2">{apiLoading ? "..." : value}</h3>
+                    <h3 className="text-3xl font-bold text-white mt-2">{value}</h3>
                     <span className="text-[10px] text-slate-500">{sub}</span>
                   </div>
                 ))}

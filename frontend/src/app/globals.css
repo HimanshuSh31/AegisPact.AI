@@ -55,20 +55,49 @@ body {
 }
 
 /* Custom Webkit scrollbar for premium look */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(9, 13, 22, 0.5); }
+::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.6); }
+
+/* ── Mobile sidebar overlay ── */
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+  z-index: 40;
+  animation: fade-in 0.2s ease;
 }
 
-::-webkit-scrollbar-track {
-  background: rgba(9, 13, 22, 0.5);
+/* ── Toast / slide-in animations ── */
+@keyframes slide-in-from-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
-::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.3);
-  border-radius: 3px;
+.animate-in { animation-fill-mode: both; }
+.slide-in-from-right-4 { animation-name: slide-in-from-right; }
+.fade-in { animation-name: fade-in; }
+.duration-300 { animation-duration: 300ms; }
+
+/* ── Skeleton shimmer ── */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+.animate-pulse {
+  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s infinite linear;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.6);
+/* ── Touch-friendly tap targets on mobile ── */
+@media (max-width: 640px) {
+  button, a { min-height: 44px; }
 }
+

@@ -93,6 +93,8 @@ export const TokenStore = {
 
 // ─── Core Fetch Wrapper ───────────────────────────────────
 
+let isRefreshing = false;
+
 async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
@@ -110,10 +112,39 @@ async function apiFetch<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
+  const requestOptions: RequestInit = {
     ...options,
     headers,
-  });
+    credentials: "include",
+  };
+
+  let res = await fetch(`${API_BASE}${path}`, requestOptions);
+
+  if (res.status === 401 && path !== "/auth/refresh" && !isRefreshing) {
+    isRefreshing = true;
+    try {
+      const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+      if (refreshRes.ok) {
+        const data = await refreshRes.json();
+        TokenStore.set(data.access_token);
+        headers["Authorization"] = `Bearer ${data.access_token}`;
+        res = await fetch(`${API_BASE}${path}`, {
+          ...requestOptions,
+          headers,
+        });
+      } else {
+        TokenStore.clear();
+      }
+    } catch {
+      TokenStore.clear();
+    } finally {
+      isRefreshing = false;
+    }
+  }
 
   if (!res.ok) {
     let errorBody: APIError;
@@ -131,7 +162,6 @@ async function apiFetch<T>(
     throw errorBody;
   }
 
-  // 204 No Content
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
@@ -151,13 +181,13 @@ export const authApi = {
     }),
 
   login: async (email: string, password: string): Promise<TokenResponse> => {
-    // OAuth2 form submission
     const form = new URLSearchParams();
     form.append("username", email);
     form.append("password", password);
     const res = await fetch(`${API_BASE}/auth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      credentials: "include",
       body: form.toString(),
     });
     if (!res.ok) {
@@ -166,6 +196,9 @@ export const authApi = {
     }
     return res.json();
   },
+
+  logout: (): Promise<void> =>
+    apiFetch("/auth/logout", { method: "POST" }),
 };
 
 // ─── Documents API ────────────────────────────────────────

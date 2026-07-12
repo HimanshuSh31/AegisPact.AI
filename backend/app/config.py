@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "supersecretjwtkey12345!@#")
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3:8b")
     

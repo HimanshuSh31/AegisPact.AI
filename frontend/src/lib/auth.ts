@@ -85,6 +85,7 @@ export function useAuth(): UseAuth {
   );
 
   const logout = useCallback(() => {
+    authApi.logout().catch(() => {}); // Clear backend cookie
     TokenStore.clear();
     setState({ user: null, token: null, isLoading: false, isAuthenticated: false });
   }, []);

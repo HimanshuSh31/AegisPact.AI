@@ -29,8 +29,9 @@ from app.models import (
     User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding,
     UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, JobStatus, DocumentRead
 )
+from jose import jwt, JWTError
 from app.auth import (
-    get_password_hash, verify_password, create_access_token, get_current_user
+    get_password_hash, verify_password, create_access_token, create_refresh_token, get_current_user
 )
 from app.worker import process_document_task, run_audit_job_task
 from app.middleware import RequestIDMiddleware
@@ -94,6 +95,92 @@ app.add_middleware(RequestIDMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+import time
+import re
+import threading
+from collections import defaultdict
+from fastapi.responses import PlainTextResponse
+
+METRICS_LOCK = threading.Lock()
+HTTP_REQUESTS_TOTAL = defaultdict(int)
+HTTP_REQUEST_DURATION_SUM = defaultdict(float)
+HTTP_REQUEST_DURATION_COUNT = defaultdict(int)
+
+@app.middleware("http")
+async def prometheus_metrics_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in ("/metrics", "/api/v1/metrics"):
+        return await call_next(request)
+
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception as exc:
+        status_code = 500
+        raise exc
+    finally:
+        duration = time.time() - start_time
+        method = request.method
+        normalized_path = re.sub(r'/\d+(/|$)', '/{id}/', path).rstrip('/')
+        if not normalized_path:
+            normalized_path = "/"
+            
+        with METRICS_LOCK:
+            HTTP_REQUESTS_TOTAL[(method, status_code, normalized_path)] += 1
+            HTTP_REQUEST_DURATION_SUM[(method, normalized_path)] += duration
+            HTTP_REQUEST_DURATION_COUNT[(method, normalized_path)] += 1
+            
+    return response
+
+@app.get("/metrics", summary="Prometheus metrics endpoint", tags=["System"])
+async def metrics_endpoint(db: AsyncSession = Depends(get_db)):
+    lines = []
+    
+    # 1. Request count
+    lines.append("# HELP http_requests_total Total number of HTTP requests processed.")
+    lines.append("# TYPE http_requests_total counter")
+    with METRICS_LOCK:
+        for (method, status, path), count in HTTP_REQUESTS_TOTAL.items():
+            lines.append(f'http_requests_total{{method="{method}",status="{status}",path="{path}"}} {count}')
+            
+    # 2. Latency
+    lines.append("# HELP http_request_duration_seconds HTTP request latency in seconds.")
+    lines.append("# TYPE http_request_duration_seconds summary")
+    with METRICS_LOCK:
+        for (method, path), duration_sum in HTTP_REQUEST_DURATION_SUM.items():
+            count = HTTP_REQUEST_DURATION_COUNT[(method, path)]
+            lines.append(f'http_request_duration_seconds{{method="{method}",path="{path}",quantile="sum"}} {duration_sum:.6f}')
+            lines.append(f'http_request_duration_seconds{{method="{method}",path="{path}",quantile="count"}} {count}')
+            
+    # 3. DB metrics
+    try:
+        stmt_completed = select(text("COUNT(*)")).select_from(text("audit_job")).where(text("status = 'COMPLETED'"))
+        completed_count = (await db.execute(stmt_completed)).scalar() or 0
+        
+        stmt_failed = select(text("COUNT(*)")).select_from(text("audit_job")).where(text("status = 'FAILED'"))
+        failed_count = (await db.execute(stmt_failed)).scalar() or 0
+        
+        stmt_avg = select(text("AVG(score)")).select_from(text("audit_job")).where(text("score IS NOT NULL"))
+        avg_score = (await db.execute(stmt_avg)).scalar() or 0.0
+        
+        lines.append("# HELP aegispact_completed_audits_total Total completed compliance audits.")
+        lines.append("# TYPE aegispact_completed_audits_total counter")
+        lines.append(f"aegispact_completed_audits_total {completed_count}")
+        
+        lines.append("# HELP aegispact_failed_audits_total Total failed compliance audits.")
+        lines.append("# TYPE aegispact_failed_audits_total counter")
+        lines.append(f"aegispact_failed_audits_total {failed_count}")
+
+        lines.append("# HELP aegispact_avg_compliance_score Average compliance score of audited contracts.")
+        lines.append("# TYPE aegispact_avg_compliance_score gauge")
+        lines.append(f"aegispact_avg_compliance_score {avg_score:.2f}")
+    except Exception as exc:
+        log.warning("metrics_db_query_failed", error=str(exc))
+        
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -318,7 +405,77 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
+    refresh_token = create_refresh_token(data={"sub": user.email, "user_id": user.id})
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        max_age=7 * 24 * 60 * 60, # 7 days
+        expires=7 * 24 * 60 * 60,
+        samesite="lax",
+        secure=False,
+    )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@v1.post(
+    "/auth/refresh",
+    response_model=Token,
+    summary="Refresh access token using HTTP-only cookie",
+    tags=["Auth"],
+)
+@limiter.limit("20/minute")
+async def refresh_access_token(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db)
+):
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token missing",
+        )
+    try:
+        payload = jwt.decode(refresh_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        email: str = payload.get("sub")
+        user_id: int = payload.get("user_id")
+        token_type: str = payload.get("type")
+        if email is None or user_id is None or token_type != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Expired or invalid refresh token")
+
+    stmt = select(User).where(User.id == user_id)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    new_access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
+    new_refresh_token = create_refresh_token(data={"sub": user.email, "user_id": user.id})
+
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        max_age=7 * 24 * 60 * 60,
+        expires=7 * 24 * 60 * 60,
+        samesite="lax",
+        secure=False,
+    )
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
+
+@v1.post(
+    "/auth/logout",
+    summary="Logout user and clear refresh token cookie",
+    tags=["Auth"],
+)
+async def logout_user(response: Response):
+    response.delete_cookie(key="refresh_token", httponly=True, samesite="lax")
+    return {"detail": "Logged out successfully"}
+
 
 # ---------------------------------------------------------
 # Documents — upload 30/min, reads 60/min, pagination on list

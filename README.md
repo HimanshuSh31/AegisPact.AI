@@ -172,9 +172,22 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```bash
 cd frontend
 npm install
+
+# Run locally in development mode (http://localhost:3000)
 npm run dev
-# Open http://localhost:3000
+
+# Build and compile static HTML export (outputs to frontend/out)
+npm run build
 ```
+
+---
+
+## 🌐 GitHub Pages Deployment
+
+The frontend dashboard is configured to automatically deploy to GitHub Pages on every push modifying the `frontend` workspace:
+- **Routing:** Uses client-side query string parameters (`/audit?id=[id]`) instead of dynamic path parameters to support static HTML hosting.
+- **Base Prefix:** Production builds automatically prepend the `/AegisPact.AI` repository name prefix (via `next.config.mjs` dynamic checks) to resolve static assets, while keeping local dev prefix-free.
+- **Workflow:** Deploys via `.github/workflows/deploy-pages.yml` to the `gh-pages` branch.
 
 ---
 

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
   Shield, ArrowLeft, CheckCircle2, XCircle, AlertTriangle,
   MinusCircle, BarChart3, FileText, Clock, Loader2,
@@ -152,15 +152,15 @@ function RagasBar({ label, value }: { label: string; value: number }) {
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────
+// ─── Main Component ───────────────────────────────────────
 
-export default function AuditFindingsPage() {
-  const params = useParams();
+export default function AuditDetailClient() {
+  const searchParams = useSearchParams();
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { error: toastError } = useToast();
 
-  const jobId = Number(params.id);
+  const jobId = Number(searchParams.get("id"));
 
   const [job, setJob]           = useState<AuditJob | null>(null);
   const [findings, setFindings] = useState<AuditFinding[]>([]);
@@ -168,7 +168,6 @@ export default function AuditFindingsPage() {
   const [framework, setFramework] = useState<Framework | null>(null);
   const [loading, setLoading]   = useState(true);
 
-  // Filter state
   const [filter, setFilter] = useState<"ALL" | "COMPLIANT" | "NON_COMPLIANT" | "NEEDS_REVIEW">("ALL");
 
   useEffect(() => {
@@ -186,7 +185,6 @@ export default function AuditFindingsPage() {
       setJob(j);
       setFindings(f);
 
-      // Load related doc & framework in background
       const [doc, fw] = await Promise.all([
         documentsApi.get(j.document_id).catch(() => null),
         frameworksApi.list().then(list => list.find(x => x.id === j.framework_id) ?? null),
@@ -221,7 +219,6 @@ export default function AuditFindingsPage() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      {/* Top nav */}
       <header className="sticky top-0 z-30 flex items-center gap-4 border-b border-slate-900 bg-slate-950/80 backdrop-blur-xl px-6 py-4">
         <Link
           href="/"
@@ -250,21 +247,17 @@ export default function AuditFindingsPage() {
       </header>
 
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-
-        {/* ── Header Card ── */}
         {loading ? (
           <AuditHeaderSkeleton />
         ) : job ? (
           <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-6">
             <div className="flex flex-col sm:flex-row sm:items-start gap-6">
-              {/* Score ring */}
               {job.compliance_score != null && (
                 <div className="shrink-0">
                   <ScoreRing score={job.compliance_score} />
                 </div>
               )}
 
-              {/* Meta */}
               <div className="flex-1 space-y-4">
                 <div>
                   <h1 className="text-lg font-bold text-white">
@@ -276,7 +269,6 @@ export default function AuditFindingsPage() {
                   </p>
                 </div>
 
-                {/* Verdict counts */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {[
                     { label: "Compliant",     val: counts.COMPLIANT,      color: "text-emerald-400" },
@@ -292,7 +284,6 @@ export default function AuditFindingsPage() {
                 </div>
               </div>
 
-              {/* Ragas metrics */}
               {job.ragas_faithfulness != null && (
                 <div className="shrink-0 w-full sm:w-52 space-y-3 p-4 rounded-lg border border-slate-900 bg-slate-950/20">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
@@ -307,7 +298,6 @@ export default function AuditFindingsPage() {
           </div>
         ) : null}
 
-        {/* ── Filter tabs ── */}
         <div className="flex items-center gap-2 flex-wrap">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mr-2">Filter:</p>
           {(["ALL", "NON_COMPLIANT", "NEEDS_REVIEW", "COMPLIANT"] as const).map((f) => (
@@ -326,7 +316,6 @@ export default function AuditFindingsPage() {
           ))}
         </div>
 
-        {/* ── Findings list ── */}
         <section className="space-y-3">
           {loading ? (
             Array.from({ length: 4 }).map((_, i) => <FindingCardSkeleton key={i} />)
@@ -344,7 +333,6 @@ export default function AuditFindingsPage() {
           )}
         </section>
 
-        {/* ── Document context ── */}
         {document && (
           <div className="rounded-xl border border-slate-900 bg-slate-900/20 p-5 flex items-center gap-4">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-950/50 border border-indigo-900/30 shrink-0">

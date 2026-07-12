@@ -584,7 +584,7 @@ export default function Dashboard() {
                             <td className="px-5 py-4 text-center"><StatusBadge status={job.status} /></td>
                             <td className="px-5 py-4 text-right">
                               <Link
-                                href={`/audit/${job.id}`}
+                                href={`/audit?id=${job.id}`}
                                 className="inline-flex items-center gap-1 text-xs font-bold text-indigo-400 hover:text-indigo-300"
                               >
                                 Findings <ArrowRight className="h-3 w-3" />

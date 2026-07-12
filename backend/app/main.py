@@ -27,7 +27,7 @@ from app.database import get_db, init_db
 from app.logger import get_logger
 from app.models import (
     User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding,
-    UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, JobStatus, DocumentRead
+    UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, AuditJobBatchCreate, JobStatus, DocumentRead
 )
 from jose import jwt, JWTError
 from app.auth import (
@@ -679,6 +679,64 @@ async def run_audit(
     await db.refresh(job)
     run_audit_job_task.delay(job.id)
     return job
+
+
+@v1.post(
+    "/audits/batch",
+    response_model=List[AuditJob],
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger parallel compliance audits for multiple contracts",
+    description="Fires asynchronous audit jobs for each provided contract. Returns metadata for all scheduled jobs.",
+    tags=["Audits"],
+)
+@limiter.limit("10/minute")
+async def run_batch_audit(
+    request: Request,
+    response: Response,
+    batch_data: AuditJobBatchCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    fw_stmt = select(ComplianceFramework).where(ComplianceFramework.id == batch_data.framework_id)
+    fw = (await db.execute(fw_stmt)).scalar_one_or_none()
+    if not fw:
+        raise HTTPException(status_code=404, detail="Compliance Framework not found")
+
+    created_jobs = []
+    
+    # Process each document
+    for doc_id in batch_data.document_ids:
+        doc_stmt = select(Document).where(
+            Document.id == doc_id,
+            Document.organization_id == current_user.organization_id
+        )
+        doc = (await db.execute(doc_stmt)).scalar_one_or_none()
+        if not doc:
+            log.warning("batch_audit_doc_ignored", doc_id=doc_id, reason="Not found or unauthorized")
+            continue
+
+        job = AuditJob(
+            document_id=doc.id,
+            framework_id=fw.id,
+            status=JobStatus.PENDING,
+            run_by_id=current_user.id
+        )
+        db.add(job)
+        created_jobs.append(job)
+
+    if not created_jobs:
+        raise HTTPException(status_code=400, detail="No valid documents found for batch audit.")
+
+    await db.commit()
+    
+    # Refresh all jobs and delay tasks
+    for job in created_jobs:
+        await db.refresh(job)
+        run_audit_job_task.delay(job.id)
+
+    log.info("batch_audit_dispatched", count=len(created_jobs), framework_id=fw.id)
+    return created_jobs
+
 
 
 @v1.get(

@@ -24,24 +24,58 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings
 
 from app.database import init_db, async_session_maker
-from app.models import User
+from app.models import User, Document, ComplianceFramework, Organization, JobStatus
 from app.auth import get_password_hash
 
 
 async def test_polish_and_security():
-    print("Initializing in-memory database...")
+    print("Initializing database...")
     await init_db()
     
-    # Create a test user directly in DB
+    # Create test data
     async with async_session_maker() as db:
+        org = Organization(name="Test Org")
+        db.add(org)
+        await db.flush()
+        
         user = User(
             email="tester@aegispact.ai",
             hashed_password=get_password_hash("password123"),
             full_name="Test User",
-            organization_id=1,
+            organization_id=org.id,
             is_admin=True
         )
         db.add(user)
+        await db.flush()
+        
+        doc1 = Document(
+            name="contract1.pdf",
+            file_path="mock1.pdf",
+            file_type=".pdf",
+            size_bytes=1024,
+            organization_id=org.id,
+            uploader_id=user.id,
+            status=JobStatus.COMPLETED
+        )
+        doc2 = Document(
+            name="contract2.pdf",
+            file_path="mock2.pdf",
+            file_type=".pdf",
+            size_bytes=1024,
+            organization_id=org.id,
+            uploader_id=user.id,
+            status=JobStatus.COMPLETED
+        )
+        db.add(doc1)
+        db.add(doc2)
+        await db.flush()
+        
+        fw = ComplianceFramework(
+            name="Test Policy",
+            description="Testing batch compliance audits.",
+            rules=[{"rule_id": "RULE-1", "title": "Mock Rule", "description": "Ensure layout is populated."}]
+        )
+        db.add(fw)
         await db.commit()
     
     # Run tests using ASGI transport or local httpx client against the app instance
@@ -96,7 +130,21 @@ async def test_polish_and_security():
         assert 'refresh_token=""' in logout_res.headers.get("set-cookie") or "Max-Age=0" in logout_res.headers.get("set-cookie")
         print("OK: Logout successfully clears refresh token cookie.")
         
-        # 4. Test Prometheus /metrics endpoint
+        # 4. Test Batch Auditing trigger
+        print("Testing POST /api/v1/audits/batch...")
+        batch_res = await client.post(
+            "/api/v1/audits/batch",
+            headers={"Authorization": f"Bearer {data['access_token']}"},
+            json={"document_ids": [1, 2], "framework_id": 1}
+        )
+        assert batch_res.status_code == 202, f"Batch trigger failed: {batch_res.text}"
+        batch_jobs = batch_res.json()
+        assert len(batch_jobs) == 2
+        assert batch_jobs[0]["document_id"] == 1
+        assert batch_jobs[1]["document_id"] == 2
+        print("OK: Batch auditing successfully triggered.")
+        
+        # 5. Test Prometheus /metrics endpoint
         print("Testing GET /metrics...")
         metrics_res = await client.get("/metrics")
         assert metrics_res.status_code == 200

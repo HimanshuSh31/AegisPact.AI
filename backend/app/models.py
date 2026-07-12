@@ -161,3 +161,7 @@ class FrameworkCreate(SQLModel):
 class AuditJobCreate(SQLModel):
     document_id: int
     framework_id: int
+
+class AuditJobBatchCreate(SQLModel):
+    document_ids: List[int]
+    framework_id: int

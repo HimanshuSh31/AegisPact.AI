@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -15,6 +16,14 @@ class Settings(BaseSettings):
     
     # Storage setting
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
+
+    # Slack & Email notification configurations
+    SLACK_WEBHOOK_URL: Optional[str] = os.getenv("SLACK_WEBHOOK_URL", None)
+    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST", None)
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: Optional[str] = os.getenv("SMTP_USER", None)
+    SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD", None)
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "alerts@aegispact.ai")
     
     class Config:
         case_sensitive = True

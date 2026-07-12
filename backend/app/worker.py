@@ -227,12 +227,174 @@ async def async_run_audit_job(audit_job_id: int):
             job.completed_at = datetime.utcnow()
             await session.commit()
             
+            # Send notification
+            await notify_audit_completion(job.id, session)
+            
             logger.info(f"Worker task completed: Audit job {audit_job_id} scored {job.score}%.")
             return True
 
         except Exception as e:
             logger.error(f"Worker audit job failure for job {audit_job_id}: {str(e)}", exc_info=True)
-            job.status = JobStatus.FAILED
-            job.completed_at = datetime.utcnow()
-            await session.commit()
+            try:
+                job.status = JobStatus.FAILED
+                job.completed_at = datetime.utcnow()
+                await session.commit()
+                # Send failure notification
+                await notify_audit_completion(job.id, session, failed=True, error_msg=str(e))
+            except Exception as db_exc:
+                logger.error(f"Failed to record audit job failure in DB: {str(db_exc)}")
             return False
+
+
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import httpx
+from app.models import User, ComplianceFramework
+
+async def notify_audit_completion(job_id: int, session: AsyncSession, failed: bool = False, error_msg: str = ""):
+    """Send Slack Webhook alerts and SMTP HTML emails to user upon Celery job completion."""
+    try:
+        stmt = select(AuditJob).where(AuditJob.id == job_id)
+        job = (await session.execute(stmt)).scalar_one_or_none()
+        if not job:
+            return
+            
+        doc_stmt = select(Document).where(Document.id == job.document_id)
+        doc = (await session.execute(doc_stmt)).scalar_one_or_none()
+        
+        fw_stmt = select(ComplianceFramework).where(ComplianceFramework.id == job.framework_id)
+        fw = (await session.execute(fw_stmt)).scalar_one_or_none()
+        
+        user_stmt = select(User).where(User.id == job.run_by_id)
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        
+        doc_name = doc.name if doc else f"Document #{job.document_id}"
+        fw_name = fw.name if fw else f"Framework #{job.framework_id}"
+        user_email = user.email if user else None
+        user_name = user.full_name if user else "Auditor"
+        
+        status_text = "FAILED" if failed else "COMPLETED"
+        score_text = f"{job.score}%" if (job.score is not None and not failed) else "N/A"
+        
+        # 1. Slack Webhook Dispatch
+        if settings.SLACK_WEBHOOK_URL:
+            color = "#ef4444" if failed else ("#10b981" if job.score >= 80 else "#f59e0b")
+            slack_payload = {
+                "attachments": [
+                    {
+                        "color": color,
+                        "title": f"Compliance Audit {status_text}: {doc_name}",
+                        "text": f"Audit Job #{job.id} has completed.",
+                        "fields": [
+                            {"title": "Document", "value": doc_name, "short": True},
+                            {"title": "Framework", "value": fw_name, "short": True},
+                            {"title": "Compliance Score", "value": score_text, "short": True},
+                            {"title": "Audited By", "value": user_name, "short": True}
+                        ]
+                    }
+                ]
+            }
+            if failed:
+                slack_payload["attachments"][0]["fields"].append(
+                    {"title": "Error Message", "value": error_msg or "Unknown error", "short": False}
+                )
+            elif job.eval_result:
+                f_score = job.eval_result.get("faithfulness", 0.0)
+                r_score = job.eval_result.get("answer_relevance", 0.0)
+                slack_payload["attachments"][0]["fields"].append(
+                    {"title": "Ragas Quality Metrics", "value": f"Faithfulness: {f_score:.2f} | Relevance: {r_score:.2f}", "short": False}
+                )
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(settings.SLACK_WEBHOOK_URL, json=slack_payload)
+                    logger.info(f"Slack webhook dispatched successfully for job {job_id}")
+            except Exception as se:
+                logger.warning(f"Failed to send Slack webhook for job {job_id}: {str(se)}")
+
+        # 2. SMTP Email Dispatch
+        if settings.SMTP_HOST and user_email:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[AegisPact.AI] Compliance Audit {status_text} - {doc_name}"
+            msg["From"] = settings.SMTP_FROM
+            msg["To"] = user_email
+            
+            html_content = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; background-color: #f8fafc; color: #1e293b; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 30px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                    <div style="border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
+                        <h2 style="color: #6366f1; margin: 0;">🛡️ AegisPact.AI Scorecard</h2>
+                        <span style="font-size: 12px; color: #64748b;">Automated Compliance Audit Report</span>
+                    </div>
+                    <p>Dear {user_name},</p>
+                    <p>Your contract compliance audit job has finished with status <strong>{status_text}</strong>.</p>
+                    
+                    <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                        <tr style="background: #f1f5f9;">
+                            <td style="padding: 10px; font-weight: bold; border: 1px solid #cbd5e1;">Audit Job ID</td>
+                            <td style="padding: 10px; border: 1px solid #cbd5e1;">#{job.id}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; font-weight: bold; border: 1px solid #cbd5e1;">Document Name</td>
+                            <td style="padding: 10px; border: 1px solid #cbd5e1;">{doc_name}</td>
+                        </tr>
+                        <tr style="background: #f1f5f9;">
+                            <td style="padding: 10px; font-weight: bold; border: 1px solid #cbd5e1;">Policy Framework</td>
+                            <td style="padding: 10px; border: 1px solid #cbd5e1;">{fw_name}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; font-weight: bold; border: 1px solid #cbd5e1; color: #6366f1; font-size: 16px;">Compliance Score</td>
+                            <td style="padding: 10px; border: 1px solid #cbd5e1; font-weight: bold; font-size: 16px; color: #6366f1;">{score_text}</td>
+                        </tr>
+                    </table>
+            """
+            
+            if failed:
+                html_content += f"""
+                    <div style="background: #fff1f2; border: 1px solid #ffe4e6; border-radius: 6px; padding: 15px; margin-top: 15px; color: #e11d48;">
+                        <strong>Audit Failure Error:</strong><br/>
+                        <code style="font-size: 13px;">{error_msg}</code>
+                    </div>
+                """
+            elif job.eval_result:
+                f_score = job.eval_result.get("faithfulness", 0.0)
+                r_score = job.eval_result.get("answer_relevance", 0.0)
+                c_recall = job.eval_result.get("context_recall", 0.0)
+                html_content += f"""
+                    <h3 style="color: #334155; border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 20px;">📊 MLOps Ragas Quality Metrics</h3>
+                    <ul>
+                        <li><strong>Faithfulness:</strong> {f_score * 100:.1f}%</li>
+                        <li><strong>Answer Relevance:</strong> {r_score * 100:.1f}%</li>
+                        <li><strong>Context Recall:</strong> {c_recall * 100:.1f}%</li>
+                    </ul>
+                """
+            
+            html_content += """
+                    <p style="margin-top: 30px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 15px;">
+                        This is an automated notification from AegisPact.AI. Please do not reply.
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            msg.attach(MIMEText(html_content, "html"))
+            
+            def send_mail_sync():
+                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10.0) as server:
+                    if settings.SMTP_USER and settings.SMTP_PASSWORD:
+                        server.starttls()
+                        server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                    server.sendmail(settings.SMTP_FROM, user_email, msg.as_string())
+            
+            try:
+                await asyncio.to_thread(send_mail_sync)
+                logger.info(f"HTML email notification sent successfully to {user_email} for job {job_id}")
+            except Exception as ee:
+                logger.warning(f"Failed to send email notification to {user_email} for job {job_id}: {str(ee)}")
+
+    except Exception as exc:
+        logger.error(f"Error executing notify_audit_completion for job {job_id}: {str(exc)}")
+

@@ -206,9 +206,9 @@ export default function Dashboard() {
   const [uploadProgress, setUploadProgress] = useState(0);
 
   // Audit state
-  const [selectedDocId, setSelectedDocId] = useState<number | "">("");
+  const [selectedDocIds, setSelectedDocIds] = useState<number[]>([]);
   const [selectedFwId, setSelectedFwId] = useState<number | "">("");
-  const [activeJobId, setActiveJobId] = useState<number | null>(null);
+  const [activeJobIds, setActiveJobIds] = useState<number[]>([]);
   const [isAuditing, setIsAuditing] = useState(false);
 
   // Auth guard
@@ -253,7 +253,7 @@ export default function Dashboard() {
         setDocuments((prev) => [doc, ...prev]);
         setIsUploading(false);
         setUploadProgress(0);
-        setSelectedDocId(doc.id);
+        setSelectedDocIds((prev) => [...prev, doc.id]);
         toastSuccess("Document uploaded", `"${doc.name}" is being parsed.`);
       }, 400);
     } catch (e: any) {
@@ -264,31 +264,43 @@ export default function Dashboard() {
     }
   }, [toastSuccess, toastError]);
 
-  // Trigger real audit
+  // Trigger batch or single audit
   const handleTriggerAudit = useCallback(async () => {
-    if (!selectedDocId || !selectedFwId) return;
+    if (selectedDocIds.length === 0 || !selectedFwId) return;
     setIsAuditing(true);
     try {
-      const job = await auditsApi.run(Number(selectedDocId), Number(selectedFwId));
-      setJobs((prev) => [job, ...prev]);
-      setActiveJobId(job.id);
-      toastInfo("Audit dispatched", `Job #${job.id} is running in the background.`);
+      if (selectedDocIds.length === 1) {
+        const job = await auditsApi.run(selectedDocIds[0], Number(selectedFwId));
+        setJobs((prev) => [job, ...prev]);
+        setActiveJobIds((prev) => [...prev, job.id]);
+        toastInfo("Audit dispatched", `Job #${job.id} is running in the background.`);
+      } else {
+        const scheduledJobs = await auditsApi.runBatch(selectedDocIds, Number(selectedFwId));
+        setJobs((prev) => [...scheduledJobs, ...prev]);
+        setActiveJobIds((prev) => [...prev, ...scheduledJobs.map((j) => j.id)]);
+        toastSuccess("Batch audits dispatched", `Started ${scheduledJobs.length} parallel audits.`);
+      }
     } catch (e: any) {
       setIsAuditing(false);
       toastError("Audit failed to start", e?.message || "Please try again.");
     }
-  }, [selectedDocId, selectedFwId, toastInfo, toastError]);
+  }, [selectedDocIds, selectedFwId, toastInfo, toastSuccess, toastError]);
 
-  const handleAuditComplete = useCallback(async () => {
-    if (!activeJobId) return;
+  const handleAuditComplete = useCallback(async (completedJobId: number) => {
     try {
-      const updated = await auditsApi.get(activeJobId);
+      const updated = await auditsApi.get(completedJobId);
       setJobs((prev) => prev.map((j) => j.id === updated.id ? updated : j));
       toastSuccess("Audit complete", updated.compliance_score != null ? `Compliance score: ${updated.compliance_score.toFixed(1)}%` : "View findings for details.");
     } catch {}
-    setIsAuditing(false);
-    setActiveJobId(null);
-  }, [activeJobId, toastSuccess]);
+    
+    setActiveJobIds((prev) => {
+      const remaining = prev.filter((id) => id !== completedJobId);
+      if (remaining.length === 0) {
+        setIsAuditing(false);
+      }
+      return remaining;
+    });
+  }, [toastSuccess]);
 
   if (authLoading) {
     return (
@@ -463,17 +475,30 @@ export default function Dashboard() {
 
                   <div className="grid gap-4 sm:grid-cols-2 mb-5">
                     <div>
-                      <label className="block text-xs font-semibold text-slate-400 mb-2">1. Select Contract</label>
-                      <select
-                        value={selectedDocId}
-                        onChange={(e) => setSelectedDocId(e.target.value === "" ? "" : Number(e.target.value))}
-                        className="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                      >
-                        <option value="">— Choose Contract —</option>
-                        {documents.map((d) => (
-                          <option key={d.id} value={d.id}>{d.name}</option>
-                        ))}
-                      </select>
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">1. Select Contract(s)</label>
+                      <div className="border border-slate-800 bg-slate-900/60 rounded-lg p-3 max-h-[120px] overflow-y-auto space-y-2">
+                        {documents.length === 0 ? (
+                          <p className="text-xs text-slate-500 italic">No contracts uploaded yet.</p>
+                        ) : (
+                          documents.map((d) => (
+                            <label key={d.id} className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer hover:text-white transition-colors">
+                              <input
+                                type="checkbox"
+                                checked={selectedDocIds.includes(d.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedDocIds((prev) => [...prev, d.id]);
+                                  } else {
+                                    setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
+                                  }
+                                }}
+                                className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span className="truncate">{d.name}</span>
+                            </label>
+                          ))
+                        )}
+                      </div>
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-slate-400 mb-2">2. Policy Framework</label>
@@ -492,19 +517,24 @@ export default function Dashboard() {
 
                   <button
                     onClick={handleTriggerAudit}
-                    disabled={isAuditing || !selectedDocId || !selectedFwId}
+                    disabled={isAuditing || selectedDocIds.length === 0 || !selectedFwId}
                     className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors"
                   >
                     {isAuditing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
-                    {isAuditing ? "Audit Running..." : "Trigger Asynchronous Audit Job"}
+                    {isAuditing ? `Auditing (${activeJobIds.length} running)...` : "Trigger Asynchronous Audit"}
                   </button>
 
-                  {isAuditing && activeJobId && (
-                    <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-                      <p className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">
-                        Live Progress — Job #{activeJobId}
-                      </p>
-                      <ProgressStream jobId={activeJobId} onComplete={handleAuditComplete} />
+                  {activeJobIds.length > 0 && (
+                    <div className="mt-4 space-y-3">
+                      {activeJobIds.map((jobId) => (
+                        <div key={jobId} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                          <p className="text-xs font-bold text-indigo-400 mb-3 uppercase tracking-wider flex justify-between">
+                            <span>Live Progress — Job #{jobId}</span>
+                            <span className="text-[10px] text-slate-500 font-normal">SSE Stream</span>
+                          </p>
+                          <ProgressStream jobId={jobId} onComplete={() => handleAuditComplete(jobId)} />
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

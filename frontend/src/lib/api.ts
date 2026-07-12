@@ -243,6 +243,12 @@ export const auditsApi = {
       body: JSON.stringify({ document_id, framework_id }),
     }),
 
+  runBatch: (document_ids: number[], framework_id: number): Promise<AuditJob[]> =>
+    apiFetch("/audits/batch", {
+      method: "POST",
+      body: JSON.stringify({ document_ids, framework_id }),
+    }),
+
   get: (id: number): Promise<AuditJob> =>
     apiFetch(`/audits/${id}`),
 

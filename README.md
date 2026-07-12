@@ -185,17 +185,21 @@ All endpoints are versioned under `/api/v1/`. Interactive docs at **http://local
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/auth/register` | Register user & organization |
-| `POST` | `/api/v1/auth/token` | Obtain JWT access token |
+| `POST` | `/api/v1/auth/token` | Login and obtain JWT access token (sets HttpOnly refresh cookie) |
+| `POST` | `/api/v1/auth/refresh` | Rotate and issue new access/refresh tokens using HttpOnly cookie |
+| `POST` | `/api/v1/auth/logout` | Logout user and clear HttpOnly refresh cookie |
 | `GET` | `/api/v1/documents` | List ingested documents (paginated) |
 | `POST` | `/api/v1/documents/upload` | Upload a contract file |
 | `GET` | `/api/v1/frameworks` | List compliance frameworks |
 | `POST` | `/api/v1/frameworks` | Create a new framework + rules |
-| `POST` | `/api/v1/audits/run` | Dispatch a compliance audit job |
+| `POST` | `/api/v1/audits/run` | Dispatch a single contract compliance audit job |
+| `POST` | `/api/v1/audits/batch` | Dispatch parallel compliance audit jobs for multiple contracts |
 | `GET` | `/api/v1/audits/{id}` | Get audit job status + score |
 | `GET` | `/api/v1/audits/{id}/findings` | Get per-rule findings |
 | `GET` | `/api/v1/audits/{id}/stream` | SSE real-time progress stream |
 | `WS` | `/ws/audit/{id}` | WebSocket live updates |
-| `GET` | `/api/v1/health` | Health check (DB + Redis + Qdrant) |
+| `GET` | `/api/v1/health` | Health check (DB + Redis + Qdrant probes) |
+| `GET` | `/metrics` | Prometheus exposition scraper endpoint (latencies, counts, DB stats) |
 
 **Rate Limiting:** 200 req/min per IP (Redis-backed). Headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
 
@@ -283,6 +287,12 @@ Copy `backend/.env.example` and configure:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama inference server |
 | `OLLAMA_MODEL` | `llama3:8b` | Model for compliance reasoning |
 | `UPLOAD_DIR` | `./uploads` | Local file storage directory |
+| `SLACK_WEBHOOK_URL` | `None` | (Optional) URL to post scorecards to a Slack channel |
+| `SMTP_HOST` | `None` | (Optional) Mail server host for HTML report delivery |
+| `SMTP_PORT` | `587` | Port for outgoing mail delivery |
+| `SMTP_USER` | `None` | Username for mail authentication |
+| `SMTP_PASSWORD` | `None` | Password for mail authentication |
+| `SMTP_FROM` | `alerts@aegispact.ai` | Sender address for report emails |
 
 ---
 

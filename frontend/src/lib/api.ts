@@ -224,6 +224,12 @@ export const documentsApi = {
 
   search: (id: number, query: string, limit = 5): Promise<any[]> =>
     apiFetch(`/documents/${id}/search?query=${encodeURIComponent(query)}&top_k=${limit}`),
+
+  chat: (id: number, message: string, history: Array<{ role: string; content: string }>): Promise<{ answer: string; citations: Array<{ text: string; page_number: number }> }> =>
+    apiFetch(`/documents/${id}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message, history }),
+    }),
 };
 
 // ─── Frameworks API ───────────────────────────────────────

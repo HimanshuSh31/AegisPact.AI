@@ -8,7 +8,7 @@ import {
   Clock, Database, ArrowRight, BookOpen, BarChart3,
   Activity, Play, UserCheck, LogOut, Menu, X,
   Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle,
-  Search, GitCompare
+  Search, GitCompare, MessageSquare
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
@@ -424,6 +424,12 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <Link
+              href="/chat"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <MessageSquare className="h-4 w-4" /> Contract Chat
+            </Link>
             <Link
               href="/search"
               className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"

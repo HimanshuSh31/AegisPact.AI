@@ -30,7 +30,9 @@
 | 🔐 **Auth & Multi-Tenancy** | JWT OAuth2 · Per-organization data isolation · Role-based access |
 | 🧩 **API v1 + Rate Limiting** | `/api/v1/` versioning · Redis-backed rate limits (200 req/min) · `X-Request-ID` tracing |
 | 🖨️ **PDF Scorecard Reports** | One-click ReportLab PDF export compiling metadata, stats, MLOps metrics, and color-coded findings |
-| 🔍 **RAG Search Explorer** | Dense vector similarity semantic retriever to search and extract verbatim citation paragraphs |
+| 🔍 **RAG Search Explorer** | Dense vector similarity retriever to search and extract verbatim citation paragraphs |
+| 💬 **Conversational RAG Chat** | Grounded chat interface enabling interactive Q&A directly with contract clauses |
+| 📄 **OCR Scanned Fallback** | Automated OCR layout extraction using `pytesseract` to parse scanned images and signed docs |
 | 🔄 **Audit Version Compare** | Side-by-side versions scorecard diff comparing compliance scores, metrics, and rule verdicts |
 | ✍️ **Verdict Overrides** | Human-in-the-loop audit overrides to update compliance scores with justification notes |
 | 🏥 **Health Probes** | `GET /api/v1/health` probes DB, Redis, and Qdrant with per-service status |
@@ -219,6 +221,7 @@ All endpoints are versioned under `/api/v1/`. Interactive docs at **http://local
 | `GET` | `/api/v1/documents` | List ingested documents (paginated) |
 | `POST` | `/api/v1/documents/upload` | Upload a contract file |
 | `GET` | `/api/v1/documents/{id}/search` | Semantic vector cosine similarity + keyword chunk search |
+| `POST` | `/api/v1/documents/{id}/chat` | Conversational RAG Chat with message history and citations |
 | `GET` | `/api/v1/frameworks` | List compliance frameworks |
 | `POST` | `/api/v1/frameworks` | Create a new framework + rules |
 | `POST` | `/api/v1/audits/run` | Dispatch a single contract compliance audit job |
@@ -251,6 +254,9 @@ python backend/tests/test_integration.py
 
 # Run advanced features integration test (PDF, Overrides, Compare, Search)
 python backend/tests/test_advanced_features.py
+
+# Run OCR parser & conversational RAG chat integration test
+python backend/tests/test_ocr_chat.py
 ```
 
 The core integration test covers all 6 pipeline steps:
@@ -262,6 +268,7 @@ The core integration test covers all 6 pipeline steps:
 6. Results assertion — score, findings, Ragas metrics
 
 The advanced integration test verifies overrides, PDF scorecard report downloads, vector semantic chunk search explorer, and version diff comparisons.
+The OCR and Chat integration test verifies scanned document page rendering, dynamic OCR text extraction fallback, and conversational chat response grounding.
 
 **CI:** GitHub Actions runs backend tests, frontend TypeScript compilation, and lint checks on every push.
 
@@ -281,11 +288,14 @@ AegisPact.AI/
 │   │   ├── middleware.py    # X-Request-ID tracing
 │   │   ├── models.py        # SQLModel ORM + Pydantic schemas
 │   │   ├── parser.py        # Stage A: Layout parser
+│   │   ├── pdf_generator.py # ReportLab PDF generator
 │   │   ├── rag_engine.py    # Stage B: Hybrid RAG engine
 │   │   ├── evaluator.py     # Stage C: Ragas MLOps evaluator
 │   │   └── worker.py        # Celery task definitions
 │   ├── tests/
 │   │   ├── test_integration.py
+│   │   ├── test_advanced_features.py
+│   │   ├── test_ocr_chat.py
 │   │   └── run_live_demo.py
 │   ├── requirements.txt
 │   └── .env.example
@@ -296,6 +306,9 @@ AegisPact.AI/
 │       │   ├── layout.tsx        # Root layout + ToastProvider
 │       │   ├── globals.css       # Design tokens + animations
 │       │   ├── login/page.tsx    # Auth page
+│       │   ├── search/page.tsx   # RAG search explorer
+│       │   ├── compare/page.tsx  # Audit compare page
+│       │   ├── chat/page.tsx     # Conversational RAG chat page
 │       │   └── audit/[id]/page.tsx  # Findings detail page
 │       └── lib/
 │           ├── api.ts            # Typed API client

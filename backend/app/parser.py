@@ -133,9 +133,42 @@ class ContractParser:
                     # For simplicity, extract full text and also isolate non-table text blocks
                     full_text = page.extract_text() or ""
                     
+                    # OCR Fallback for scanned documents (empty page text)
+                    if not full_text.strip():
+                        logger.info(f"Page {page_num} text is empty. Running OCR scanned document fallback...")
+                        try:
+                            import pytesseract
+                            # Render pdfplumber page to image buffer
+                            pil_image = page.to_image(resolution=150).original
+                            ocr_text = pytesseract.image_to_string(pil_image)
+                            if ocr_text and ocr_text.strip():
+                                full_text = ocr_text
+                                logger.info(f"OCR successfully extracted {len(ocr_text)} chars from page {page_num}")
+                        except Exception as ocr_err:
+                            logger.warning(f"OCR fallback failed for page {page_num}: {ocr_err}")
+
                     # Grouping text blocks with bounding boxes
                     text_blocks = []
                     words = page.extract_words()
+                    
+                    # If words is empty but we have OCR text, we can construct mock word objects for layout reconstruction
+                    if not words and full_text.strip():
+                        # Split sentences/lines to populate words list
+                        dummy_words = []
+                        y_pos = 50.0
+                        for line_idx, line_str in enumerate(full_text.split("\n")):
+                            if not line_str.strip():
+                                continue
+                            for word_idx, w_str in enumerate(line_str.split()):
+                                dummy_words.append({
+                                    "text": w_str,
+                                    "x0": 50.0 + (word_idx * 40.0),
+                                    "x1": 85.0 + (word_idx * 40.0),
+                                    "top": y_pos,
+                                    "bottom": y_pos + 12.0
+                                })
+                            y_pos += 20.0
+                        words = dummy_words
                     
                     # Reconstruct lines based on vertical positioning (y-coordinate)
                     if words:

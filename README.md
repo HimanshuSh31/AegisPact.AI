@@ -29,6 +29,10 @@
 | ⚡ **Real-time Streaming** | SSE progress stream + WebSocket live updates for background Celery jobs |
 | 🔐 **Auth & Multi-Tenancy** | JWT OAuth2 · Per-organization data isolation · Role-based access |
 | 🧩 **API v1 + Rate Limiting** | `/api/v1/` versioning · Redis-backed rate limits (200 req/min) · `X-Request-ID` tracing |
+| 🖨️ **PDF Scorecard Reports** | One-click ReportLab PDF export compiling metadata, stats, MLOps metrics, and color-coded findings |
+| 🔍 **RAG Search Explorer** | Dense vector similarity semantic retriever to search and extract verbatim citation paragraphs |
+| 🔄 **Audit Version Compare** | Side-by-side versions scorecard diff comparing compliance scores, metrics, and rule verdicts |
+| ✍️ **Verdict Overrides** | Human-in-the-loop audit overrides to update compliance scores with justification notes |
 | 🏥 **Health Probes** | `GET /api/v1/health` probes DB, Redis, and Qdrant with per-service status |
 | 📋 **Structured Logging** | JSON log lines via `structlog` with `event`, `level`, `timestamp` and context fields |
 | 🔔 **Toast Notifications** | Slide-in success/error/warning/info toasts on every user action |
@@ -116,8 +120,19 @@ Runs post-audit scoring using the **Ragas** framework:
 - **Score ring** — animated SVG compliance percentage with colour coding (green ≥80%, amber ≥50%, red <50%)
 - **Per-verdict tiles** — Compliant / Non-Compliant / Needs Review / N/A counts
 - **Ragas quality bars** — Faithfulness, Answer Relevance, Context Recall
-- **Expandable finding cards** — each card shows the cited contract clause + AI compliance reasoning
+- **Expandable finding cards** — each card shows the cited contract clause, human override controls, and AI reasoning
+- **Download PDF** — one-click action to download styled ReportLab scorecards
 - **Filter tabs** — filter by verdict type
+
+### RAG Citations Explorer (`/search`)
+- Live vector search console to match semantic legal queries against parsed contract nodes
+- Dynamic relevance percentage metrics showing cosine similarity confidence
+- Source page references to instantly review original text bounds
+
+### Audit Version Comparison (`/compare`)
+- Select two historical audit runs side-by-side
+- Full diffing analysis comparing compliance score differences, Ragas quality metrics, and rule verdict changes
+- Verdict change indicators ("Improved!" / "Verdict Changed") highlighting redline revisions
 
 ### Login / Register
 - Glassmorphic auth page with animated shield logo
@@ -203,12 +218,17 @@ All endpoints are versioned under `/api/v1/`. Interactive docs at **http://local
 | `POST` | `/api/v1/auth/logout` | Logout user and clear HttpOnly refresh cookie |
 | `GET` | `/api/v1/documents` | List ingested documents (paginated) |
 | `POST` | `/api/v1/documents/upload` | Upload a contract file |
+| `GET` | `/api/v1/documents/{id}/search` | Semantic vector cosine similarity + keyword chunk search |
 | `GET` | `/api/v1/frameworks` | List compliance frameworks |
 | `POST` | `/api/v1/frameworks` | Create a new framework + rules |
 | `POST` | `/api/v1/audits/run` | Dispatch a single contract compliance audit job |
 | `POST` | `/api/v1/audits/batch` | Dispatch parallel compliance audit jobs for multiple contracts |
+| `GET` | `/api/v1/audits` | List historical compliance audit jobs |
+| `GET` | `/api/v1/audits/compare` | Compare two audit jobs side-by-side |
 | `GET` | `/api/v1/audits/{id}` | Get audit job status + score |
 | `GET` | `/api/v1/audits/{id}/findings` | Get per-rule findings |
+| `GET` | `/api/v1/audits/{id}/pdf` | Download ReportLab styled PDF report scorecard |
+| `POST` | `/api/v1/audits/{id}/findings/{finding_id}/override` | Submit a human verdict override justification |
 | `GET` | `/api/v1/audits/{id}/stream` | SSE real-time progress stream |
 | `WS` | `/ws/audit/{id}` | WebSocket live updates |
 | `GET` | `/api/v1/health` | Health check (DB + Redis + Qdrant probes) |
@@ -223,14 +243,17 @@ All endpoints are versioned under `/api/v1/`. Interactive docs at **http://local
 ## 🧪 Testing
 
 ```bash
-# Run full integration test suite (no Redis/Qdrant needed)
+# Run core integration test suite
 $env:DATABASE_URL="sqlite+aiosqlite:///:memory:"
 $env:CELERY_ALWAYS_EAGER="True"
 $env:JWT_SECRET="test_secret"
 python backend/tests/test_integration.py
+
+# Run advanced features integration test (PDF, Overrides, Compare, Search)
+python backend/tests/test_advanced_features.py
 ```
 
-The integration test covers all 6 pipeline steps:
+The core integration test covers all 6 pipeline steps:
 1. Organization + User registration
 2. Compliance Framework creation
 3. Document registry + ingestion
@@ -238,7 +261,9 @@ The integration test covers all 6 pipeline steps:
 5. Stage B Hybrid RAG Audit (mocked LLM)
 6. Results assertion — score, findings, Ragas metrics
 
-**CI:** GitHub Actions runs backend + frontend checks on every push to `main`.
+The advanced integration test verifies overrides, PDF scorecard report downloads, vector semantic chunk search explorer, and version diff comparisons.
+
+**CI:** GitHub Actions runs backend tests, frontend TypeScript compilation, and lint checks on every push.
 
 ---
 

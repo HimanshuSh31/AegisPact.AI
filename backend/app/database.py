@@ -34,3 +34,18 @@ async def init_db() -> None:
         # Import models so they are registered on SQLModel.metadata
         from app import models  # noqa
         await conn.run_sync(SQLModel.metadata.create_all)
+        
+        # Self-healing migration for human overrides
+        def upgrade_schema(sync_conn):
+            from sqlalchemy import inspect, text
+            inspector = inspect(sync_conn)
+            columns = [col["name"] for col in inspector.get_columns("audit_finding")]
+            if "is_overridden" not in columns:
+                # SQLite/PostgreSQL compatible column additions
+                sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN is_overridden BOOLEAN DEFAULT 0"))
+                sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_status VARCHAR(50)"))
+                sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_explanation TEXT"))
+                sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_by_id INTEGER"))
+                sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_at DATETIME"))
+                
+        await conn.run_sync(upgrade_schema)

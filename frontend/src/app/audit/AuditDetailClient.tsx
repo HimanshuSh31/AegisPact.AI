@@ -8,7 +8,7 @@ import {
   MinusCircle, BarChart3, FileText, Clock, Loader2,
   Activity, BookOpen, ChevronDown, ChevronUp
 } from "lucide-react";
-import { auditsApi, documentsApi, frameworksApi, type AuditJob, type AuditFinding, type Document, type Framework } from "@/lib/api";
+import { auditsApi, documentsApi, frameworksApi, TokenStore, type AuditJob, type AuditFinding, type Document, type Framework } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { AuditHeaderSkeleton, FindingCardSkeleton } from "@/lib/skeletons";
 import { useToast } from "@/lib/toast";
@@ -48,7 +48,7 @@ const VERDICT = {
 
 // ─── Finding Card ─────────────────────────────────────────
 
-function FindingCard({ finding }: { finding: AuditFinding }) {
+function FindingCard({ finding, onOverride }: { finding: AuditFinding; onOverride: (f: AuditFinding) => void }) {
   const [expanded, setExpanded] = useState(false);
   const v = VERDICT[finding.verdict] ?? VERDICT.NOT_APPLICABLE;
 
@@ -97,6 +97,24 @@ function FindingCard({ finding }: { finding: AuditFinding }) {
               🤖 AI Compliance Reasoning
             </p>
             <p className="text-sm text-slate-300 leading-relaxed">{finding.explanation}</p>
+          </div>
+          
+          {finding.is_overridden && (
+            <div className="rounded-lg bg-orange-950/20 border border-orange-900/30 p-4 text-xs text-orange-300 leading-relaxed">
+              <span className="font-bold">⚠️ Human Auditor Override Applied:</span> Verdict manually updated to <b>{finding.overridden_status}</b>.
+              {finding.overridden_explanation && (
+                <p className="mt-1 text-slate-400 font-sans italic">"Justification: {finding.overridden_explanation}"</p>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-end pt-2">
+            <button
+              onClick={() => onOverride(finding)}
+              className="text-xs font-bold text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1 border border-orange-900/30 rounded-lg px-2.5 py-1 bg-orange-950/10"
+            >
+              Override Verdict
+            </button>
           </div>
         </div>
       )}
@@ -158,7 +176,7 @@ export default function AuditDetailClient() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const { error: toastError } = useToast();
+  const { error: toastError, success: toastSuccess } = useToast();
 
   const jobId = Number(searchParams.get("id"));
 
@@ -169,6 +187,13 @@ export default function AuditDetailClient() {
   const [loading, setLoading]   = useState(true);
 
   const [filter, setFilter] = useState<"ALL" | "COMPLIANT" | "NON_COMPLIANT" | "NEEDS_REVIEW">("ALL");
+
+  // Override State
+  const [activeOverrideFinding, setActiveOverrideFinding] = useState<AuditFinding | null>(null);
+  const [overrideVerdict, setOverrideVerdict] = useState<string>("COMPLIANT");
+  const [overrideExplanation, setOverrideExplanation] = useState<string>("");
+  const [savingOverride, setSavingOverride] = useState<boolean>(false);
+  const [downloadingPDF, setDownloadingPDF] = useState<boolean>(false);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) router.push("/login");
@@ -199,6 +224,57 @@ export default function AuditDetailClient() {
   }, [jobId, isAuthenticated, toastError]);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleDownloadPDF = async () => {
+    setDownloadingPDF(true);
+    try {
+      const token = TokenStore.get();
+      const res = await fetch(`http://localhost:8000/api/v1/audits/${jobId}/pdf`, {
+        headers: {
+          Authorization: token ? `Bearer ${token}` : ""
+        }
+      });
+      if (!res.ok) throw new Error("Failed to download PDF report.");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = window.document.createElement("a");
+      a.href = url;
+      a.download = `aegispact-scorecard-${jobId}.pdf`;
+      window.document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toastSuccess("Report Downloaded", "PDF compliance scorecard report downloaded successfully.");
+    } catch (e: any) {
+      toastError("Download Failed", e?.message || "Check server connectivity.");
+    } finally {
+      setDownloadingPDF(false);
+    }
+  };
+
+  const handleSaveOverride = async () => {
+    if (!activeOverrideFinding) return;
+    if (!overrideExplanation.trim()) {
+      toastError("Justification Required", "Please provide audit override justification.");
+      return;
+    }
+    setSavingOverride(true);
+    try {
+      await auditsApi.overrideFinding(
+        jobId,
+        activeOverrideFinding.id,
+        overrideVerdict,
+        overrideExplanation
+      );
+      toastSuccess("Verdict Overridden", "Finding verdict updated successfully.");
+      setActiveOverrideFinding(null);
+      setOverrideExplanation("");
+      await load();
+    } catch (e: any) {
+      toastError("Override Failed", e?.message || "Verify permissions.");
+    } finally {
+      setSavingOverride(false);
+    }
+  };
 
   const filtered = findings.filter(f => filter === "ALL" || f.verdict === filter);
 
@@ -244,6 +320,17 @@ export default function AuditDetailClient() {
             </span>
           )}
         </div>
+        
+        {job && job.status === "COMPLETED" && (
+          <button
+            onClick={handleDownloadPDF}
+            disabled={downloadingPDF}
+            className="ml-auto flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-3.5 py-2 text-xs font-bold transition-colors shadow-lg"
+          >
+            {downloadingPDF ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
+            Download PDF Report
+          </button>
+        )}
       </header>
 
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -329,7 +416,12 @@ export default function AuditDetailClient() {
               </p>
             </div>
           ) : (
-            filtered.map((f) => <FindingCard key={f.id} finding={f} />)
+            filtered.map((f) => (
+              <FindingCard key={f.id} finding={f} onOverride={(f) => {
+                setActiveOverrideFinding(f);
+                setOverrideVerdict(f.verdict);
+              }} />
+            ))
           )}
         </section>
 
@@ -354,6 +446,67 @@ export default function AuditDetailClient() {
           </div>
         )}
       </div>
+
+      {/* Override Modal */}
+      {activeOverrideFinding && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-4">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Shield className="h-5 w-5 text-orange-400" /> Human Override Justification
+            </h3>
+            <p className="text-xs text-slate-400 leading-snug">
+              Modify the compliance verdict for rule <span className="font-mono text-orange-300 font-bold">{activeOverrideFinding.rule_id}</span>.
+            </p>
+            
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">New Verdict</label>
+                <select
+                  value={overrideVerdict}
+                  onChange={(e) => setOverrideVerdict(e.target.value)}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="COMPLIANT">Compliant</option>
+                  <option value="NON_COMPLIANT">Non-Compliant</option>
+                  <option value="NEEDS_REVIEW">Needs Review</option>
+                  <option value="NOT_APPLICABLE">Not Applicable</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Auditor Reason / Justification</label>
+                <textarea
+                  value={overrideExplanation}
+                  onChange={(e) => setOverrideExplanation(e.target.value)}
+                  placeholder="State the exception justification or redline revision..."
+                  rows={4}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => {
+                  setActiveOverrideFinding(null);
+                  setOverrideExplanation("");
+                }}
+                className="rounded-lg border border-slate-800 px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-950 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveOverride}
+                disabled={savingOverride}
+                className="flex items-center gap-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:bg-slate-800 text-white px-4 py-2 text-xs font-bold transition-all shadow-md"
+              >
+                {savingOverride && <Loader2 className="h-3 w-3 animate-spin" />}
+                Save Override
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

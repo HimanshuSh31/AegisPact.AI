@@ -7,7 +7,8 @@ import {
   Shield, Upload, FileText, CheckCircle2,
   Clock, Database, ArrowRight, BookOpen, BarChart3,
   Activity, Play, UserCheck, LogOut, Menu, X,
-  Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle
+  Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle,
+  Search, GitCompare
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
@@ -223,12 +224,14 @@ export default function Dashboard() {
     if (!isAuthenticated) return;
     setApiLoading(true);
     try {
-      const [docs, fws] = await Promise.all([
+      const [docs, fws, auditJobs] = await Promise.all([
         documentsApi.list(),
         frameworksApi.list(),
+        auditsApi.list(),
       ]);
       setDocuments(docs);
       setFrameworks(fws);
+      setJobs(auditJobs);
     } catch (e: any) {
       toastError("Failed to load data", e?.message || "Check your connection and try again.");
     } finally {
@@ -421,6 +424,18 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <Link
+              href="/search"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <Search className="h-4 w-4" /> RAG Search
+            </Link>
+            <Link
+              href="/compare"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <GitCompare className="h-4 w-4" /> Compare
+            </Link>
             <button onClick={loadData} className="p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all">
               <RefreshCw className="h-4 w-4" />
             </button>

@@ -1,4 +1,5 @@
 import os
+import io
 import uuid
 import shutil
 import asyncio
@@ -27,7 +28,8 @@ from app.database import get_db, init_db
 from app.logger import get_logger
 from app.models import (
     User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding,
-    UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, AuditJobBatchCreate, JobStatus, DocumentRead
+    UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, AuditJobBatchCreate, JobStatus, DocumentRead,
+    AuditFindingOverride, FindingStatus
 )
 from jose import jwt, JWTError
 from app.auth import (
@@ -35,6 +37,8 @@ from app.auth import (
 )
 from app.worker import process_document_task, run_audit_job_task
 from app.middleware import RequestIDMiddleware
+from app.pdf_generator import generate_compliance_pdf
+from app.rag_engine import SemanticChunker, DenseRetriever
 
 log = get_logger(__name__)
 
@@ -740,6 +744,112 @@ async def run_batch_audit(
 
 
 @v1.get(
+    "/audits",
+    response_model=List[AuditJob],
+    summary="List compliance audit jobs for the current organization",
+    tags=["Audits"],
+)
+async def list_audits(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    doc_stmt = select(Document.id).where(Document.organization_id == current_user.organization_id)
+    doc_ids = (await db.execute(doc_stmt)).scalars().all()
+    if not doc_ids:
+        return []
+    stmt = select(AuditJob).where(AuditJob.document_id.in_(doc_ids)).order_by(AuditJob.started_at.desc())
+    jobs = (await db.execute(stmt)).scalars().all()
+    return jobs
+
+
+@v1.get(
+    "/audits/compare",
+    summary="Compare two audit jobs side-by-side",
+    tags=["Audits"],
+)
+async def compare_audits(
+    job_a: int,
+    job_b: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    ja = await db.get(AuditJob, job_a)
+    jb = await db.get(AuditJob, job_b)
+    if not ja or not jb:
+        raise HTTPException(status_code=404, detail="One or both audit jobs not found")
+
+    doc_a = await db.get(Document, ja.document_id)
+    doc_b = await db.get(Document, jb.document_id)
+    if not doc_a or not doc_b or doc_a.organization_id != current_user.organization_id or doc_b.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    fw_a = await db.get(ComplianceFramework, ja.framework_id)
+    fw_b = await db.get(ComplianceFramework, jb.framework_id)
+
+    f_a = (await db.execute(select(AuditFinding).where(AuditFinding.audit_job_id == job_a))).scalars().all()
+    f_b = (await db.execute(select(AuditFinding).where(AuditFinding.audit_job_id == job_b))).scalars().all()
+
+    rules_a = {r["rule_id"]: r["title"] for r in fw_a.rules} if fw_a else {}
+    rules_b = {r["rule_id"]: r["title"] for r in fw_b.rules} if fw_b else {}
+    all_titles = {**rules_a, **rules_b}
+
+    map_a = {f.rule_id: f for f in f_a}
+    map_b = {f.rule_id: f for f in f_b}
+
+    all_rule_ids = set(map_a.keys()).union(set(map_b.keys()))
+
+    comparison = []
+    for r_id in all_rule_ids:
+        fa = map_a.get(r_id)
+        fb = map_b.get(r_id)
+
+        status_a = fa.overridden_status if fa and fa.is_overridden and fa.overridden_status else (fa.status if fa else None)
+        status_b = fb.overridden_status if fb and fb.is_overridden and fb.overridden_status else (fb.status if fb else None)
+
+        comparison.append({
+            "rule_id": r_id,
+            "rule_title": all_titles.get(r_id, r_id),
+            "verdict_a": status_a.value if status_a else None,
+            "verdict_b": status_b.value if status_b else None,
+            "explanation_a": fa.explanation if fa else None,
+            "explanation_b": fb.explanation if fb else None,
+            "clause_a": fa.clause_text if fa else None,
+            "clause_b": fb.clause_text if fb else None,
+            "page_a": fa.page_number if fa else None,
+            "page_b": fb.page_number if fb else None,
+        })
+
+    return {
+        "job_a": {
+            "id": ja.id,
+            "score": ja.score,
+            "document_name": doc_a.name,
+            "framework_name": fw_a.name if fw_a else f"Framework #{ja.framework_id}",
+            "completed_at": ja.completed_at,
+            "eval_result": {
+                "faithfulness": ja.eval_result.get("faithfulness", 0.0) if ja.eval_result else getattr(ja, "ragas_faithfulness", None),
+                "answer_relevance": ja.eval_result.get("answer_relevance", 0.0) if ja.eval_result else getattr(ja, "ragas_relevance", None),
+                "context_recall": ja.eval_result.get("context_recall", 0.0) if ja.eval_result else getattr(ja, "ragas_recall", None)
+            } if (ja.eval_result or getattr(ja, "ragas_faithfulness", None) is not None) else None
+        },
+        "job_b": {
+            "id": jb.id,
+            "score": jb.score,
+            "document_name": doc_b.name,
+            "framework_name": fw_b.name if fw_b else f"Framework #{jb.framework_id}",
+            "completed_at": jb.completed_at,
+            "eval_result": {
+                "faithfulness": jb.eval_result.get("faithfulness", 0.0) if jb.eval_result else getattr(jb, "ragas_faithfulness", None),
+                "answer_relevance": jb.eval_result.get("answer_relevance", 0.0) if jb.eval_result else getattr(jb, "ragas_relevance", None),
+                "context_recall": jb.eval_result.get("context_recall", 0.0) if jb.eval_result else getattr(jb, "ragas_recall", None)
+            } if (jb.eval_result or getattr(jb, "ragas_faithfulness", None) is not None) else None
+        },
+        "findings_comparison": comparison
+    }
+
+
+
+@v1.get(
     "/audits/{id}",
     response_model=AuditJob,
     summary="Get audit job status",
@@ -770,7 +880,6 @@ async def get_audit_status(
 
 @v1.get(
     "/audits/{id}/findings",
-    response_model=List[AuditFinding],
     summary="Get compliance findings for a completed audit",
     tags=["Audits"],
 )
@@ -797,7 +906,31 @@ async def get_audit_findings(
 
     findings_stmt = select(AuditFinding).where(AuditFinding.audit_job_id == job.id)
     findings = (await db.execute(findings_stmt)).scalars().all()
-    return findings
+
+    # Load framework to map rule titles
+    fw_stmt = select(ComplianceFramework).where(ComplianceFramework.id == job.framework_id)
+    fw = (await db.execute(fw_stmt)).scalar_one_or_none()
+    rules_map = {r["rule_id"]: r["title"] for r in fw.rules} if fw else {}
+
+    enriched = []
+    for f in findings:
+        # If overridden, use overridden_status, else use f.status
+        current_status = f.overridden_status if f.is_overridden and f.overridden_status else f.status
+        enriched.append({
+            "id": f.id,
+            "audit_job_id": f.audit_job_id,
+            "rule_id": f.rule_id,
+            "rule_title": rules_map.get(f.rule_id, f.rule_id),
+            "verdict": current_status.value,
+            "explanation": f.explanation,
+            "clause_text": f.clause_text,
+            "page_number": f.page_number,
+            "severity": f.severity.value,
+            "is_overridden": f.is_overridden,
+            "overridden_status": f.overridden_status.value if f.overridden_status else None,
+            "overridden_explanation": f.overridden_explanation
+        })
+    return enriched
 
 
 @v1.get(
@@ -864,6 +997,175 @@ async def websocket_audit_stream(websocket: WebSocket, job_id: int):
             await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
         audit_stream.disconnect(job_id, websocket)
+
+@v1.get(
+    "/audits/{id}/pdf",
+    summary="Download PDF compliance report scorecard",
+    tags=["Audits"],
+)
+async def download_audit_pdf(
+    id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    job = await db.get(AuditJob, id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Audit job not found")
+
+    doc = await db.get(Document, job.document_id)
+    if not doc or doc.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this audit report")
+
+    fw = await db.get(ComplianceFramework, job.framework_id)
+    framework_name = fw.name if fw else f"Framework #{job.framework_id}"
+
+    # Load findings and enrich
+    findings_stmt = select(AuditFinding).where(AuditFinding.audit_job_id == job.id)
+    findings = (await db.execute(findings_stmt)).scalars().all()
+    
+    rules_map = {r["rule_id"]: r["title"] for r in fw.rules} if fw else {}
+    enriched_findings = []
+    for f in findings:
+        current_status = f.overridden_status if f.is_overridden and f.overridden_status else f.status
+        enriched_findings.append({
+            "rule_id": f.rule_id,
+            "rule_title": rules_map.get(f.rule_id, f.rule_id),
+            "verdict": current_status.value,
+            "clause_text": f.clause_text,
+            "page_number": f.page_number,
+            "explanation": f.explanation,
+            "is_overridden": f.is_overridden,
+            "overridden_status": f.overridden_status.value if f.overridden_status else None,
+            "overridden_explanation": f.overridden_explanation
+        })
+
+    pdf_bytes = generate_compliance_pdf(
+        job=job,
+        doc_name=doc.name,
+        framework_name=framework_name,
+        findings=enriched_findings,
+        auditor_name=current_user.full_name
+    )
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="aegispact-scorecard-{id}.pdf"'}
+    )
+
+
+@v1.post(
+    "/audits/{id}/findings/{finding_id}/override",
+    summary="Override a compliance rule finding verdict",
+    tags=["Audits"],
+)
+async def override_finding(
+    id: int,
+    finding_id: int,
+    payload: AuditFindingOverride,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    job = await db.get(AuditJob, id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Audit Job not found")
+
+    doc = await db.get(Document, job.document_id)
+    if not doc or doc.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    finding = await db.get(AuditFinding, finding_id)
+    if not finding or finding.audit_job_id != id:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    # Apply override
+    finding.is_overridden = True
+    finding.overridden_status = payload.status
+    finding.overridden_explanation = payload.explanation
+    finding.overridden_by_id = current_user.id
+    finding.overridden_at = datetime.utcnow()
+    db.add(finding)
+    await db.flush()
+
+    # Recalculate overall score for job
+    all_findings_stmt = select(AuditFinding).where(AuditFinding.audit_job_id == id)
+    all_findings = (await db.execute(all_findings_stmt)).scalars().all()
+
+    compliant_count = 0
+    total_applicable = 0
+    for f in all_findings:
+        status_to_use = f.overridden_status if f.is_overridden and f.overridden_status else f.status
+        if status_to_use != FindingStatus.NOT_APPLICABLE:
+            total_applicable += 1
+            if status_to_use == FindingStatus.COMPLIANT:
+                compliant_count += 1
+
+    compliance_score = (compliant_count / total_applicable * 100.0) if total_applicable > 0 else 100.0
+    job.score = round(compliance_score, 2)
+    db.add(job)
+    await db.commit()
+
+    return {
+        "status": "success",
+        "finding_id": finding.id,
+        "new_score": job.score,
+        "verdict": (finding.overridden_status.value if finding.overridden_status else finding.status.value),
+        "explanation": finding.explanation,
+        "is_overridden": finding.is_overridden,
+        "overridden_explanation": finding.overridden_explanation
+    }
+
+
+@v1.get(
+    "/documents/{id}/search",
+    summary="Semantic vector and keyword search explorer",
+    tags=["Documents"],
+)
+async def search_document_chunks(
+    id: int,
+    query: str,
+    top_k: int = Query(default=5, ge=1, le=20),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    doc = await db.get(Document, id)
+    if not doc or doc.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if doc.status != JobStatus.COMPLETED or not doc.parsing_result:
+        raise HTTPException(status_code=400, detail="Document layout has not been processed/parsed yet")
+
+    # Generate chunks
+    chunker = SemanticChunker(target_chunk_size=400, overlap=50)
+    chunks = chunker.chunk_document(doc.parsing_result)
+
+    dense_retriever = DenseRetriever(qdrant_url=settings.QDRANT_URL, ollama_base_url=settings.OLLAMA_BASE_URL)
+    
+    # Pre-seed the mock database with these chunks to guarantee similarity scores fallback succeeds offline
+    dense_retriever._mock_db[str(doc.id)] = [
+        {
+            "chunk_id": c["chunk_id"],
+            "text": c["text"],
+            "page_number": c["page_number"],
+            "vector": await dense_retriever.get_embedding(c["text"])
+        }
+        for c in chunks
+    ]
+
+    raw_results = await dense_retriever.search(document_id=doc.id, query=query, top_k=top_k)
+    
+    formatted = []
+    for score, chunk in raw_results:
+        formatted.append({
+            "score": round(score, 4),
+            "text": chunk["text"],
+            "page_number": chunk["page_number"]
+        })
+        
+    return formatted
+
+
+
 
 # ---------------------------------------------------------
 # Mount versioned router

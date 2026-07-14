@@ -69,6 +69,9 @@ export interface AuditFinding {
   explanation: string;
   clause_text: string | null;
   page_number: number | null;
+  is_overridden?: boolean;
+  overridden_status?: string | null;
+  overridden_explanation?: string | null;
 }
 
 export interface TokenResponse {
@@ -218,6 +221,9 @@ export const documentsApi = {
       body: form,
     });
   },
+
+  search: (id: number, query: string, limit = 5): Promise<any[]> =>
+    apiFetch(`/documents/${id}/search?query=${encodeURIComponent(query)}&top_k=${limit}`),
 };
 
 // ─── Frameworks API ───────────────────────────────────────
@@ -252,8 +258,25 @@ export const auditsApi = {
   get: (id: number): Promise<AuditJob> =>
     apiFetch(`/audits/${id}`),
 
+  list: (): Promise<AuditJob[]> =>
+    apiFetch("/audits"),
+
   findings: (id: number): Promise<AuditFinding[]> =>
     apiFetch(`/audits/${id}/findings`),
+
+  overrideFinding: (
+    jobId: number,
+    findingId: number,
+    status: string,
+    explanation: string
+  ): Promise<any> =>
+    apiFetch(`/audits/${jobId}/findings/${findingId}/override`, {
+      method: "POST",
+      body: JSON.stringify({ status, explanation }),
+    }),
+
+  compare: (jobA: number, jobB: number): Promise<any> =>
+    apiFetch(`/audits/compare?job_a=${jobA}&job_b=${jobB}`),
 
   /**
    * Returns an EventSource connected to the SSE progress stream.

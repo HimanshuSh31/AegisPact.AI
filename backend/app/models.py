@@ -115,6 +115,13 @@ class AuditFinding(SQLModel, table=True):
     # Relationships
     audit_job: AuditJob = Relationship(back_populates="findings")
 
+    # Human-in-the-loop overrides
+    is_overridden: bool = Field(default=False)
+    overridden_status: Optional[FindingStatus] = Field(default=None)
+    overridden_explanation: Optional[str] = Field(default=None)
+    overridden_by_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    overridden_at: Optional[datetime] = Field(default=None)
+
 # Pydantic schemas for request / response serialization
 class UserCreate(SQLModel):
     email: str
@@ -165,3 +172,7 @@ class AuditJobCreate(SQLModel):
 class AuditJobBatchCreate(SQLModel):
     document_ids: List[int]
     framework_id: int
+
+class AuditFindingOverride(SQLModel):
+    status: FindingStatus
+    explanation: str

@@ -8,7 +8,7 @@ import {
   Clock, Database, ArrowRight, BookOpen, BarChart3,
   Activity, Play, UserCheck, LogOut, Menu, X,
   Loader2, AlertCircle, RefreshCw, UploadCloud, XCircle,
-  Search, GitCompare, MessageSquare
+  Search, GitCompare, MessageSquare, Download
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
@@ -425,16 +425,22 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
             <Link
+              href="/frameworks-builder"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <Shield className="h-4 w-4" /> Policies
+            </Link>
+            <Link
+              href="/scheduler"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <Clock className="h-4 w-4" /> Scheduler
+            </Link>
+            <Link
               href="/chat"
               className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
             >
-              <MessageSquare className="h-4 w-4" /> Contract Chat
-            </Link>
-            <Link
-              href="/search"
-              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
-            >
-              <Search className="h-4 w-4" /> RAG Search
+              <MessageSquare className="h-4 w-4" /> Chat
             </Link>
             <Link
               href="/compare"
@@ -442,6 +448,14 @@ export default function Dashboard() {
             >
               <GitCompare className="h-4 w-4" /> Compare
             </Link>
+            <a
+              href="http://localhost:8000/api/v1/audits/export"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-800 text-indigo-400 hover:text-indigo-300 hover:border-slate-700 px-3 py-1.5 text-xs font-semibold transition-all"
+            >
+              <Download className="h-4 w-4" /> Export CSV
+            </a>
             <button onClick={loadData} className="p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all">
               <RefreshCw className="h-4 w-4" />
             </button>

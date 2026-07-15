@@ -39,13 +39,27 @@ async def init_db() -> None:
         def upgrade_schema(sync_conn):
             from sqlalchemy import inspect, text
             inspector = inspect(sync_conn)
+            
+            # Check audit_finding human override fields
             columns = [col["name"] for col in inspector.get_columns("audit_finding")]
             if "is_overridden" not in columns:
-                # SQLite/PostgreSQL compatible column additions
                 sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN is_overridden BOOLEAN DEFAULT 0"))
                 sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_status VARCHAR(50)"))
                 sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_explanation TEXT"))
                 sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_by_id INTEGER"))
                 sync_conn.execute(text("ALTER TABLE audit_finding ADD COLUMN overridden_at DATETIME"))
+
+            # Check audit_schedule table
+            if "audit_schedule" not in inspector.get_table_names():
+                sync_conn.execute(text("""
+                    CREATE TABLE audit_schedule (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document_id INTEGER NOT NULL,
+                        framework_id INTEGER NOT NULL,
+                        cron_expression VARCHAR(100) DEFAULT '0 0 * * *',
+                        next_run_at DATETIME,
+                        created_at DATETIME
+                    )
+                """))
                 
         await conn.run_sync(upgrade_schema)

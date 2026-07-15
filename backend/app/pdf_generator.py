@@ -297,3 +297,207 @@ def generate_compliance_pdf(
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
+
+
+def generate_comparison_pdf(
+    job_a: Any,
+    job_b: Any,
+    doc_a_name: str,
+    doc_b_name: str,
+    framework_name: str,
+    comparison_findings: List[Dict[str, Any]],
+    auditor_name: str
+) -> bytes:
+    """
+    Compiles the side-by-side compliance audit comparison scorecard into a PDF.
+    """
+    buffer = io.BytesIO()
+    
+    # Setup document
+    pdf_doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=54,
+        rightMargin=54,
+        topMargin=54,
+        bottomMargin=60
+    )
+
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        "DocTitle",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=26,
+        textColor=PRIMARY_COLOR,
+        spaceAfter=6
+    )
+    
+    subtitle_style = ParagraphStyle(
+        "DocSub",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=15,
+        textColor=TEXT_MUTED,
+        spaceAfter=20
+    )
+    
+    h1_style = ParagraphStyle(
+        "SectionH1",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=17,
+        textColor=PRIMARY_COLOR,
+        spaceBefore=12,
+        spaceAfter=8,
+        keepWithNext=True
+    )
+    
+    meta_label_style = ParagraphStyle(
+        "MetaLabel",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        leading=13,
+        textColor=TEXT_DARK
+    )
+    
+    meta_val_style = ParagraphStyle(
+        "MetaValue",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=13,
+        textColor=TEXT_DARK
+    )
+    
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=13,
+        textColor=TEXT_DARK
+    )
+
+    story = []
+
+    # 1. Header Banner
+    story.append(Paragraph("AegisPact.AI Comparative Audit Report", title_style))
+    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", subtitle_style))
+    story.append(Spacer(1, 10))
+
+    # 2. Side-by-Side Metadata Table
+    meta_data = [
+        [Paragraph("Comparison Metric", meta_label_style), Paragraph("Audit Job A (Original)", meta_label_style), Paragraph("Audit Job B (Comparison)", meta_label_style)],
+        [Paragraph("Document Name:", meta_label_style), Paragraph(doc_a_name, meta_val_style), Paragraph(doc_b_name, meta_val_style)],
+        [Paragraph("Compliance Score:", meta_label_style), Paragraph(f"{job_a.score:.1f}%", meta_val_style), Paragraph(f"{job_b.score:.1f}%", meta_val_style)],
+        [Paragraph("Framework Config:", meta_label_style), Paragraph(framework_name, meta_val_style), Paragraph(framework_name, meta_val_style)],
+        [Paragraph("Auditor Profile:", meta_label_style), Paragraph(auditor_name, meta_val_style), Paragraph(auditor_name, meta_val_style)]
+    ]
+    meta_table = Table(meta_data, colWidths=[120, 192, 192])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#f8fafc")),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ('GRID', (0,0), (-1,-1), 0.5, BORDER_COLOR),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 15))
+
+    # 3. Verdict alignment comparison list
+    story.append(Paragraph("Policy Control Alignment Findings", h1_style))
+
+    for idx, rule in enumerate(comparison_findings):
+        verdict_a = rule.get("verdict_a")
+        verdict_b = rule.get("verdict_b")
+        changed = verdict_a != verdict_b
+        improved = verdict_a == "NON_COMPLIANT" and verdict_b == "COMPLIANT"
+        
+        # Color borders based on status
+        border_col = colors.HexColor("#312e81")  # default primary
+        bg_col = colors.HexColor("#ffffff")      # default white
+        
+        if changed:
+            if improved:
+                bg_col = colors.HexColor("#f0fdf4")      # light green bg
+                border_col = colors.HexColor("#16a34a")  # green border
+            else:
+                bg_col = colors.HexColor("#fffbeb")      # light orange bg
+                border_col = colors.HexColor("#d97706")  # orange border
+                
+        finding_elements = []
+        
+        # Title bar table
+        title_bar_data = [
+            [
+                Paragraph(f"Rule: {rule['rule_id']}", meta_label_style),
+                Paragraph(rule["rule_title"], meta_val_style),
+                Paragraph("VERDICT CHANGED" if changed else "NO CHANGE", ParagraphStyle("Badge", parent=meta_label_style, textColor=border_col, fontSize=8))
+            ]
+        ]
+        title_table = Table(title_bar_data, colWidths=[100, 304, 100])
+        title_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f1f5f9")),
+            ('ALIGN', (2,0), (2,0), 'RIGHT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ]))
+        finding_elements.append(title_table)
+        finding_elements.append(Spacer(1, 5))
+
+        # Side by side verdict comparisons table
+        col_style_a = ParagraphStyle(
+            "ColA",
+            parent=body_style,
+            textColor=VERDICT_TEXT_COLORS.get(verdict_a, colors.black) if verdict_a else colors.black
+        )
+        col_style_b = ParagraphStyle(
+            "ColB",
+            parent=body_style,
+            textColor=VERDICT_TEXT_COLORS.get(verdict_b, colors.black) if verdict_b else colors.black
+        )
+        
+        side_data = [
+            [
+                Paragraph(f"<b>Job A Verdict: {verdict_a}</b>", col_style_a),
+                Paragraph(f"<b>Job B Verdict: {verdict_b}</b>", col_style_b)
+            ],
+            [
+                Paragraph(f"<i>Citation: {rule.get('clause_a') or 'No citation'}</i> (Page {rule.get('page_a') or 1})", body_style),
+                Paragraph(f"<i>Citation: {rule.get('clause_b') or 'No citation'}</i> (Page {rule.get('page_b') or 1})", body_style)
+            ],
+            [
+                Paragraph(rule.get("explanation_a") or "No explanation", body_style),
+                Paragraph(rule.get("explanation_b") or "No explanation", body_style)
+            ]
+        ]
+        
+        side_table = Table(side_data, colWidths=[248, 256])
+        side_table.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BACKGROUND', (0,0), (-1,-1), bg_col),
+            ('BOX', (0,0), (-1,-1), 1, border_col),
+            ('LINEAFTER', (0,0), (0,-1), 0.5, border_col),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ]))
+        
+        finding_elements.append(side_table)
+        finding_elements.append(Spacer(1, 10))
+        story.append(KeepTogether(finding_elements))
+
+    # Build the document
+    pdf_doc.build(story, canvasmaker=NumberedCanvas)
+    
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
+

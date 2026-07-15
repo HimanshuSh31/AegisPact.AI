@@ -192,6 +192,20 @@ export default function CompareAuditsPage() {
           </div>
         ) : (
           <div className="space-y-6">
+            <div className="flex justify-between items-center flex-wrap gap-4 border-b border-slate-900 pb-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Comparison Overview</h3>
+              </div>
+              <a
+                href={`http://localhost:8000/api/v1/audits/compare/pdf?id_a=${jobAId}&id_b=${jobBId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/50 hover:bg-slate-900 text-xs font-semibold px-3 py-2 text-indigo-400 hover:text-indigo-300 transition-all flex items-center gap-1.5"
+              >
+                Download Comparison PDF
+              </a>
+            </div>
+
             {/* Scorecard side by side */}
             <div className="grid gap-6 md:grid-cols-2">
               {/* Job A summary card */}

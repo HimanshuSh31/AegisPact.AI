@@ -39,6 +39,7 @@ export interface ComplianceRule {
   rule_id: string;
   title: string;
   description: string;
+  severity?: string;
 }
 
 export interface Framework {
@@ -244,6 +245,16 @@ export const frameworksApi = {
     rules: ComplianceRule[];
   }): Promise<Framework> =>
     apiFetch("/frameworks", { method: "POST", body: JSON.stringify(data) }),
+
+  update: (id: number, data: {
+    name?: string;
+    description?: string;
+    rules?: ComplianceRule[];
+  }): Promise<Framework> =>
+    apiFetch(`/frameworks/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+
+  delete: (id: number): Promise<{ status: string; message: string }> =>
+    apiFetch(`/frameworks/${id}`, { method: "DELETE" }),
 };
 
 // ─── Audits API ───────────────────────────────────────────
@@ -312,4 +323,29 @@ export const auditsApi = {
 export const healthApi = {
   check: (): Promise<{ status: string; version: string; service: string; timestamp: string }> =>
     apiFetch("/health"),
+};
+
+// ─── Scheduler API ─────────────────────────────────────────
+
+export interface AuditSchedule {
+  id: number;
+  document_id: number;
+  framework_id: number;
+  cron_expression: string;
+  next_run_at: string;
+  created_at: string;
+}
+
+export const schedulesApi = {
+  list: (): Promise<AuditSchedule[]> =>
+    apiFetch("/schedules"),
+
+  create: (data: { document_id: number; framework_id: number; cron_expression: string }): Promise<AuditSchedule> =>
+    apiFetch("/schedules", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: number): Promise<{ status: string; message: string }> =>
+    apiFetch(`/schedules/${id}`, { method: "DELETE" }),
 };

@@ -25,12 +25,12 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
-from app.database import get_db, init_db
+from app.database import get_db, init_db, async_session_maker
 from app.logger import get_logger
 from app.models import (
     User, Organization, Document, ComplianceFramework, AuditJob, AuditFinding,
     UserCreate, UserRead, Token, FrameworkCreate, AuditJobCreate, AuditJobBatchCreate, JobStatus, DocumentRead,
-    AuditFindingOverride, FindingStatus
+    AuditFindingOverride, FindingStatus, AuditSchedule, AuditScheduleCreate, FrameworkUpdate
 )
 from jose import jwt, JWTError
 from app.auth import (
@@ -38,7 +38,7 @@ from app.auth import (
 )
 from app.worker import process_document_task, run_audit_job_task
 from app.middleware import RequestIDMiddleware
-from app.pdf_generator import generate_compliance_pdf
+from app.pdf_generator import generate_compliance_pdf, generate_comparison_pdf
 from app.rag_engine import SemanticChunker, DenseRetriever
 
 log = get_logger(__name__)
@@ -71,11 +71,73 @@ def _build_limiter() -> Limiter:
 
 limiter = _build_limiter()
 
+from datetime import timedelta
+
+def calculate_next_run(cron_expression: str) -> datetime:
+    now = datetime.utcnow()
+    expr = cron_expression.lower().strip()
+    if expr in ["hourly", "0 * * * *", "*/60 * * * *"]:
+        return now + timedelta(hours=1)
+    elif expr in ["daily", "0 0 * * *", "0 12 * * *"]:
+        return now + timedelta(days=1)
+    elif expr in ["weekly", "0 0 * * 0", "0 0 * * 7"]:
+        return now + timedelta(weeks=1)
+    else:
+        return now + timedelta(days=1)
+
+
+async def cron_scheduler_loop():
+    """
+    Periodic background loop scanning for due schedules and triggering Celery audits.
+    """
+    # Delay initial loop slightly to allow DB to fully startup
+    await asyncio.sleep(5)
+    while True:
+        try:
+            now = datetime.utcnow()
+            async with async_session_maker() as db:
+                stmt = select(AuditSchedule).where(AuditSchedule.next_run_at <= now)
+                due = (await db.execute(stmt)).scalars().all()
+                
+                for sched in due:
+                    # Create job
+                    doc = await db.get(Document, sched.document_id)
+                    if doc:
+                        job = AuditJob(
+                            document_id=sched.document_id,
+                            framework_id=sched.framework_id,
+                            status=JobStatus.PENDING,
+                            run_by_id=doc.uploader_id
+                        )
+                        db.add(job)
+                        await db.flush()
+                        
+                        run_audit_job_task.delay(job.id)
+                        
+                        # Recalculate next run timestamp
+                        sched.next_run_at = calculate_next_run(sched.cron_expression)
+                        db.add(sched)
+                        log.info("cron_scheduled_audit_triggered", schedule_id=sched.id, doc_id=sched.document_id, job_id=job.id)
+                
+                await db.commit()
+        except Exception as e:
+            log.warning("cron_scheduler_loop_error", error=str(e))
+        
+        await asyncio.sleep(30) # check every 30 seconds
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup", service="AegisPact.AI API", version="1.0.0")
     await init_db()
+    
+    # Start background scheduler loop task
+    loop_task = asyncio.create_task(cron_scheduler_loop())
+    
     yield
+    
+    # Cancel task on shutdown
+    loop_task.cancel()
     log.info("shutdown", service="AegisPact.AI API")
 
 # ---------------------------------------------------------
@@ -640,6 +702,64 @@ async def list_frameworks(
     response.headers["X-Limit"] = str(limit)
     return frameworks
 
+
+@v1.put(
+    "/frameworks/{id}",
+    response_model=ComplianceFramework,
+    summary="Update a compliance framework",
+    tags=["Frameworks"],
+)
+async def update_framework(
+    id: int,
+    payload: FrameworkUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    fw = await db.get(ComplianceFramework, id)
+    if not fw:
+        raise HTTPException(status_code=404, detail="Framework not found")
+        
+    if payload.name is not None:
+        fw.name = payload.name
+    if payload.description is not None:
+        fw.description = payload.description
+    if payload.rules is not None:
+        # Validate rules list is not empty
+        if not payload.rules:
+            raise HTTPException(status_code=400, detail="Rules list cannot be empty")
+        fw.rules = payload.rules
+        
+    db.add(fw)
+    await db.commit()
+    await db.refresh(fw)
+    return fw
+
+
+@v1.delete(
+    "/frameworks/{id}",
+    summary="Delete a compliance framework",
+    tags=["Frameworks"],
+)
+async def delete_framework(
+    id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    fw = await db.get(ComplianceFramework, id)
+    if not fw:
+        raise HTTPException(status_code=404, detail="Framework not found")
+        
+    # Check if there are any jobs using this framework
+    jobs_stmt = select(AuditJob).where(AuditJob.framework_id == id)
+    jobs = (await db.execute(jobs_stmt)).scalars().all()
+    if jobs:
+        raise HTTPException(status_code=400, detail="Cannot delete framework currently referenced by audit jobs.")
+        
+    await db.delete(fw)
+    await db.commit()
+    return {"status": "success", "message": f"Framework #{id} deleted successfully."}
+
+
 # ---------------------------------------------------------
 # Audits — trigger 20/min, reads 60/min, WebSocket streaming
 # ---------------------------------------------------------
@@ -847,7 +967,139 @@ async def compare_audits(
         },
         "findings_comparison": comparison
     }
+@v1.get(
+    "/audits/compare/pdf",
+    summary="Download side-by-side comparative PDF audit report",
+    tags=["Audits"],
+)
+async def download_comparison_pdf(
+    id_a: int = Query(...),
+    id_b: int = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # Fetch jobs
+    job_a = await db.get(AuditJob, id_a)
+    job_b = await db.get(AuditJob, id_b)
+    if not job_a or not job_b:
+        raise HTTPException(status_code=404, detail="One or both audit jobs not found")
+        
+    doc_a = await db.get(Document, job_a.document_id)
+    doc_b = await db.get(Document, job_b.document_id)
+    if not doc_a or not doc_b:
+        raise HTTPException(status_code=404, detail="Underlying contracts not found")
+        
+    if doc_a.organization_id != current_user.organization_id or doc_b.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    framework = await db.get(ComplianceFramework, job_a.framework_id)
+    framework_name = framework.name if framework else "Custom Framework"
+    rules = framework.rules if framework else []
 
+    # Query findings
+    stmt_a = select(AuditFinding).where(AuditFinding.audit_job_id == id_a)
+    findings_a = (await db.execute(stmt_a)).scalars().all()
+    stmt_b = select(AuditFinding).where(AuditFinding.audit_job_id == id_b)
+    findings_b = (await db.execute(stmt_b)).scalars().all()
+
+    findings_a_map = {f.rule_id: f for f in findings_a}
+    findings_b_map = {f.rule_id: f for f in findings_b}
+
+    comparison = []
+    for r in rules:
+        r_id = r.get("rule_id")
+        f_a = findings_a_map.get(r_id)
+        f_b = findings_b_map.get(r_id)
+        
+        status_a = (f_a.overridden_status or f_a.status) if f_a else FindingStatus.NOT_APPLICABLE
+        status_b = (f_b.overridden_status or f_b.status) if f_b else FindingStatus.NOT_APPLICABLE
+        
+        comparison.append({
+            "rule_id": r_id,
+            "rule_title": r.get("title", r_id),
+            "verdict_a": status_a.value,
+            "verdict_b": status_b.value,
+            "clause_a": f_a.clause_text if f_a else None,
+            "clause_b": f_b.clause_text if f_b else None,
+            "page_a": f_a.page_number if f_a else 1,
+            "page_b": f_b.page_number if f_b else 1,
+            "explanation_a": f_a.explanation if f_a else "No audit findings registered.",
+            "explanation_b": f_b.explanation if f_b else "No audit findings registered."
+        })
+
+    pdf_bytes = generate_comparison_pdf(
+        job_a=job_a,
+        job_b=job_b,
+        doc_a_name=doc_a.name,
+        doc_b_name=doc_b.name,
+        framework_name=framework_name,
+        comparison_findings=comparison,
+        auditor_name=current_user.full_name
+    )
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="aegispact-comparison-{id_a}-to-{id_b}.pdf"'}
+    )
+
+
+@v1.get(
+    "/audits/export",
+    summary="Export all compliance audit logs as CSV",
+    tags=["Audits"],
+)
+async def export_audits_csv(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # Fetch all completed jobs belonging to user's organization
+    stmt = (
+        select(AuditJob, Document, ComplianceFramework)
+        .join(Document, AuditJob.document_id == Document.id)
+        .join(ComplianceFramework, AuditJob.framework_id == ComplianceFramework.id)
+        .where(Document.organization_id == current_user.organization_id)
+        .order_by(AuditJob.started_at.desc())
+    )
+    results = (await db.execute(stmt)).all()
+    
+    # Generate CSV content
+    import csv
+    csv_buffer = io.StringIO()
+    writer = csv.writer(csv_buffer)
+    
+    # Header
+    writer.writerow([
+        "Audit Job ID", "Contract Name", "Compliance Framework", 
+        "Audit Status", "Compliance Score (%)", "Ragas Faithfulness (%)", 
+        "Ragas Answer Relevance (%)", "Ragas Context Recall (%)", "Triggered At"
+    ])
+    
+    for job, doc, fw in results:
+        faithfulness = job.eval_result.get("faithfulness", 0.0) if job.eval_result else 0.0
+        relevance = job.eval_result.get("answer_relevance", 0.0) if job.eval_result else 0.0
+        recall = job.eval_result.get("context_recall", 0.0) if job.eval_result else 0.0
+        
+        writer.writerow([
+            job.id,
+            doc.name,
+            fw.name,
+            job.status.value,
+            f"{job.score:.2f}" if job.score is not None else "N/A",
+            f"{faithfulness * 100:.0f}" if faithfulness else "0",
+            f"{relevance * 100:.0f}" if relevance else "0",
+            f"{recall * 100:.0f}" if recall else "0",
+            job.started_at.strftime("%Y-%m-%d %H:%M:%S")
+        ])
+        
+    csv_content = csv_buffer.getvalue()
+    csv_buffer.close()
+    
+    return StreamingResponse(
+        io.BytesIO(csv_content.encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=\"aegispact-compliance-logs.csv\""}
+    )
 
 
 @v1.get(
@@ -1277,6 +1529,92 @@ async def chat_document(
             for c in context_chunks
         ]
     }
+
+
+
+# ─── Scheduler Endpoints ────────────────────────────────────
+
+@v1.post(
+    "/schedules",
+    response_model=AuditSchedule,
+    summary="Create a new recurring audit schedule",
+    tags=["Scheduler"],
+)
+async def create_schedule(
+    payload: AuditScheduleCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    doc = await db.get(Document, payload.document_id)
+    if not doc or doc.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=404, detail="Contract not found")
+        
+    fw = await db.get(ComplianceFramework, payload.framework_id)
+    if not fw:
+        raise HTTPException(status_code=404, detail="Framework not found")
+        
+    # Check if duplicate schedule exists
+    stmt = select(AuditSchedule).where(
+        AuditSchedule.document_id == payload.document_id,
+        AuditSchedule.framework_id == payload.framework_id
+    )
+    existing = (await db.execute(stmt)).scalars().first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Recurring audit schedule already exists for this contract and framework.")
+
+    sched = AuditSchedule(
+        document_id=payload.document_id,
+        framework_id=payload.framework_id,
+        cron_expression=payload.cron_expression,
+        next_run_at=calculate_next_run(payload.cron_expression)
+    )
+    db.add(sched)
+    await db.commit()
+    await db.refresh(sched)
+    return sched
+
+
+@v1.get(
+    "/schedules",
+    response_model=List[AuditSchedule],
+    summary="List all recurring audit schedules",
+    tags=["Scheduler"],
+)
+async def list_schedules(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # Fetch all schedules belonging to the user's organization
+    stmt = (
+        select(AuditSchedule)
+        .join(Document, AuditSchedule.document_id == Document.id)
+        .where(Document.organization_id == current_user.organization_id)
+    )
+    schedules = (await db.execute(stmt)).scalars().all()
+    return schedules
+
+
+@v1.delete(
+    "/schedules/{id}",
+    summary="Delete a recurring audit schedule",
+    tags=["Scheduler"],
+)
+async def delete_schedule(
+    id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    sched = await db.get(AuditSchedule, id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+        
+    doc = await db.get(Document, sched.document_id)
+    if not doc or doc.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    await db.delete(sched)
+    await db.commit()
+    return {"status": "success", "message": f"Schedule #{id} deleted successfully."}
 
 
 # ---------------------------------------------------------

@@ -176,3 +176,25 @@ class AuditJobBatchCreate(SQLModel):
 class AuditFindingOverride(SQLModel):
     status: FindingStatus
     explanation: str
+
+
+class AuditSchedule(SQLModel, table=True):
+    __tablename__ = "audit_schedule"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    document_id: int = Field(foreign_key="document.id", index=True)
+    framework_id: int = Field(foreign_key="compliance_framework.id", index=True)
+    cron_expression: str = Field(default="0 0 * * *")  # cron scheduler string
+    next_run_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AuditScheduleCreate(SQLModel):
+    document_id: int
+    framework_id: int
+    cron_expression: str = "0 0 * * *"
+
+
+class FrameworkUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rules: Optional[List[Dict[str, Any]]] = None

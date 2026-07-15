@@ -224,16 +224,23 @@ All endpoints are versioned under `/api/v1/`. Interactive docs at **http://local
 | `POST` | `/api/v1/documents/{id}/chat` | Conversational RAG Chat with message history and citations |
 | `GET` | `/api/v1/frameworks` | List compliance frameworks |
 | `POST` | `/api/v1/frameworks` | Create a new framework + rules |
+| `PUT` | `/api/v1/frameworks/{id}` | Update compliance framework metadata or checklist rules |
+| `DELETE` | `/api/v1/frameworks/{id}` | Delete compliance framework configuration |
 | `POST` | `/api/v1/audits/run` | Dispatch a single contract compliance audit job |
 | `POST` | `/api/v1/audits/batch` | Dispatch parallel compliance audit jobs for multiple contracts |
 | `GET` | `/api/v1/audits` | List historical compliance audit jobs |
 | `GET` | `/api/v1/audits/compare` | Compare two audit jobs side-by-side |
+| `GET` | `/api/v1/audits/compare/pdf` | Download side-by-side comparative PDF audit report |
+| `GET` | `/api/v1/audits/export` | Export all completed compliance logs as a CSV file |
 | `GET` | `/api/v1/audits/{id}` | Get audit job status + score |
 | `GET` | `/api/v1/audits/{id}/findings` | Get per-rule findings |
 | `GET` | `/api/v1/audits/{id}/pdf` | Download ReportLab styled PDF report scorecard |
 | `POST` | `/api/v1/audits/{id}/findings/{finding_id}/override` | Submit a human verdict override justification |
 | `GET` | `/api/v1/audits/{id}/stream` | SSE real-time progress stream |
 | `WS` | `/ws/audit/{id}` | WebSocket live updates |
+| `POST` | `/api/v1/schedules` | Create recurring contract compliance audit cron schedule |
+| `GET` | `/api/v1/schedules` | List active recurring audit cron schedules |
+| `DELETE` | `/api/v1/schedules/{id}` | Delete active recurring audit schedule |
 | `GET` | `/api/v1/health` | Health check (DB + Redis + Qdrant probes) |
 | `GET` | `/metrics` | Prometheus exposition scraper endpoint (latencies, counts, DB stats) |
 
